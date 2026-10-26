@@ -1,0 +1,40 @@
+﻿# ---- Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# ---- 打包产物
+# dist 里是 190MB 的 exe，.build 是 PyInstaller 的工作目录（~500MB）。
+# 发布走 GitHub Releases，不把二进制塞进 git 历史——一旦提交就永远
+# 留在 pack 里，仓库体积再也降不下来。
+dist/
+.build/
+build/
+*.spec.bak
+
+# ---- 生成/可再生的数据
+# 关卡缓存 1836 个 JSON（112MB）、图标 147MB、干员 27MB：都能用
+# 「同步全图鉴」或 tools 下的脚本重新拉出来，不适合进版本库。
+akcalc/data/cache/levels/
+akcalc/data/icons/
+akcalc/data/cache/operators.json
+akcalc/data/cache/operators.json.bak
+akcalc/data/cache/prts_enemy_wikitext/
+
+# 超大单一数据文件（数 MB 的派生表）
+akcalc/data/skill_table_full.json
+
+# ---- 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 本地配置与临时文件
+akcalc/data/cache/settings.json
+*.log
+*~$*
