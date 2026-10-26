@@ -24,9 +24,17 @@ import urllib.request
 #: GitHub 仓库（发版后填实际地址）
 REPO = "Surtrsdog/Feiniu_miaomiao_tools"
 
-#: Releases API。用 ``/latest`` 而不是 ``/releases``：前者拿到的就是
-#: 「最新正式版」，不用自己在列表里挑，也自动跳过 draft。
-API_LATEST = "https://api.github.com/repos/%s/releases/latest"
+#: Releases API。
+#:
+#: **不能用 ``/releases/latest``**：那个接口按 GitHub 的定义只返回
+#: 「最新正式版」，会把 ``prerelease: true`` 的整条跳过。本项目 beta
+#: 阶段每个版本都是预发布，用它就永远查不到——表现是仓库明明发了
+#: beta2，程序却一直说「还没找到发布页」。
+#:
+#: 改成列 ``/releases`` 后自己在客户端挑：先滤掉 draft，再取版本号最大
+#: 的那个（而不是列表第一个，列表按创建时间倒序，补发的旧版本会插到
+#: 前面）。预发布和正式版一起参与比较。
+API_RELEASES = "https://api.github.com/repos/%s/releases"
 
 _TIMEOUT = 8
 
@@ -116,7 +124,7 @@ def check_latest(current: str, repo: str = "", timeout: int = _TIMEOUT) -> Updat
     if not slug or "/" not in slug or slug.startswith("owner/"):
         return UpdateInfo(False, current=current,
                           error="还没有配置仓库地址，暂时无法检查更新")
-    url = API_LATEST % slug
+    url = API_RELEASES % slug
     req = urllib.request.Request(url, headers={
         "User-Agent": "FeiNiuMiaoMiao-UpdateChecker",
         "Accept": "application/vnd.github+json",
@@ -147,11 +155,21 @@ def check_latest(current: str, repo: str = "", timeout: int = _TIMEOUT) -> Updat
     finally:
         socket.setdefaulttimeout(_prev)
 
-    tag = str(data.get("tag_name") or data.get("name") or "").strip()
-    html = str(data.get("html_url") or "").strip()
-    notes = str(data.get("body") or "").strip()
-    pub = str(data.get("published_at") or "")[:10]
-    if not tag:
-        return UpdateInfo(False, current=current, error="Release 没有版本号")
+    if not isinstance(data, list):
+        return UpdateInfo(False, current=current, error="GitHub 返回了意外的数据")
+    # 滤掉草稿；预发布**要留着**，beta 阶段发的都是预发布。
+    cands = [r for r in data
+             if isinstance(r, dict) and not r.get("draft")
+             and str(r.get("tag_name") or "").strip()]
+    if not cands:
+        return UpdateInfo(False, current=current,
+                          error="仓库还没有正式发布任何版本")
+    # 取版本号最大的那个，而不是列表第一个：列表按创建时间倒序，
+    # 补发一个旧版本会插到最前面，直接用第一条会「降级」。
+    best = max(cands, key=lambda r: parse_version(str(r.get("tag_name") or "")))
+    tag = str(best.get("tag_name") or "").strip()
+    html = str(best.get("html_url") or "").strip()
+    notes = str(best.get("body") or "").strip()
+    pub = str(best.get("published_at") or "")[:10]
     return UpdateInfo(True, current=current, latest=tag, url=html,
                       notes=notes, published=pub)
