@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import urllib.error
 import urllib.request
 
 #: GitHub 仓库（发版后填实际地址）
-REPO = "owner/akcalc"
+REPO = "feiniu-miaomiao/feiniu-miaomiao-tools"
 
 #: Releases API。用 ``/latest`` 而不是 ``/releases``：前者拿到的就是
 #: 「最新正式版」，不用自己在列表里挑，也自动跳过 draft。
@@ -120,13 +121,21 @@ def check_latest(current: str, repo: str = "", timeout: int = _TIMEOUT) -> Updat
         "User-Agent": "FeiNiuMiaoMiao-UpdateChecker",
         "Accept": "application/vnd.github+json",
     })
+    # ``urlopen(timeout=)`` 只约束**已建立连接之后**的读写，DNS 解析不受它管。
+    # 国内解析 api.github.com 经常被投毒到不可达的地址，那里会一路卡到
+    # 系统默认的 21 秒——用户点了「检查更新」看着按钮灰二十秒，以为卡死。
+    # 这里把全局默认超时临时压到 timeout，解析阶段也受约束。
+    _prev = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as fh:
             data = json.loads(fh.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 404:
+            # 仓库还没发过 Release 时也是 404，和仓库不存在同码，
+            # 提示里把两种可能都写出来，免得用户以为是网络问题。
             return UpdateInfo(False, current=current,
-                              error="仓库或 Release 不存在（q=404）")
+                              error="还没找到发布页（仓库未建或尚未发版）")
         return UpdateInfo(False, current=current,
                           error="GitHub 返回 HTTP %d" % e.code)
     except urllib.error.URLError as e:
@@ -135,6 +144,8 @@ def check_latest(current: str, repo: str = "", timeout: int = _TIMEOUT) -> Updat
     except Exception as e:                                  # noqa: BLE001
         return UpdateInfo(False, current=current,
                           error="检查失败：%s" % e)
+    finally:
+        socket.setdefaulttimeout(_prev)
 
     tag = str(data.get("tag_name") or data.get("name") or "").strip()
     html = str(data.get("html_url") or "").strip()
