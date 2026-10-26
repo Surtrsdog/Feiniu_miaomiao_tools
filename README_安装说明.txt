@@ -1,4 +1,4 @@
-﻿肥牛妙妙工具 · beta2
+肥牛妙妙工具 · beta2
 ====================================
 
 明日方舟 伤害计算 / 寻路分析 工具
@@ -37,4 +37,4 @@
 
 反馈
 ------------------------------------
-https://github.com/feiniu-miaomiao/feiniu-miaomiao-tools/issues
+https://github.com/Surtrsdog/Feiniu_miaomiao_tools/issues

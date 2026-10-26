@@ -36,7 +36,7 @@ APP_VERSION = "beta2"
 APP_VERSION_HINT = "测试版"
 
 #: 项目 GitHub 地址（「检查更新」从 Releases 拉版本清单）
-GITHUB_REPO = "https://github.com/feiniu-miaomiao/feiniu-miaomiao-tools"
+GITHUB_REPO = "https://github.com/Surtrsdog/Feiniu_miaomiao_tools"
 
 #: 预览用的示例文本
 _PREVIEW_TEXT = "单次伤害 630　DPS 430"

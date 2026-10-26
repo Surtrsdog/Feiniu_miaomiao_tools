@@ -9,8 +9,8 @@
 #define AppName "肥牛妙妙工具"
 #define AppVer "beta2"
 #define AppExe "肥牛妙妙工具.exe"
-#define AppPub "feiniu-miaomiao"
-#define AppUrl "https://github.com/feiniu-miaomiao/feiniu-miaomiao-tools"
+#define AppPub "Surtrsdog"
+#define AppUrl "https://github.com/Surtrsdog/Feiniu_miaomiao_tools"
 
 [Setup]
 AppId={{8F3A2C71-4B9D-4E6A-9C15-7D2E8B4F1A63}

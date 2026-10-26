@@ -1,4 +1,4 @@
-﻿# ---- Python
+# ---- Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -13,6 +13,11 @@ dist/
 .build/
 build/
 *.spec.bak
+
+# Release 附件单独存放的目录：exe 只上传到 Releases，不进版本库。
+# 这里只忽略二进制和校验和，notes 还是跟着仓库走。
+release/**/*.exe
+release/**/SHA256SUMS.txt
 
 # ---- 生成/可再生的数据
 # 关卡缓存 1836 个 JSON（112MB）、图标 147MB、干员 27MB：都能用

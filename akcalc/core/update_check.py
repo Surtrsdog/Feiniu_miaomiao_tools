@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 
 #: GitHub 仓库（发版后填实际地址）
-REPO = "feiniu-miaomiao/feiniu-miaomiao-tools"
+REPO = "Surtrsdog/Feiniu_miaomiao_tools"
 
 #: Releases API。用 ``/latest`` 而不是 ``/releases``：前者拿到的就是
 #: 「最新正式版」，不用自己在列表里挑，也自动跳过 draft。
