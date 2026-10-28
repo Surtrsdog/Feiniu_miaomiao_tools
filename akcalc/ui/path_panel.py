@@ -13,7 +13,7 @@ from ..core.catalog import (CATEGORY_DESC, CATEGORY_ORDER, Stage,
                             StageCatalog, StageGroup)
 from ..core.coords import coord_label
 from ..core.enemies import (enemies_of_level, level_enemy_ids,
-                            level_enemy_overrides)
+                            level_enemy_overrides, spawn_unmovable_of_ref)
 from ..core.maps import get_level
 from ..core.models import EnemyStats, GameMap
 from ..core.timeline import (Timeline, fill_names, parse_timeline,
@@ -21,27 +21,38 @@ from ..core.timeline import (Timeline, fill_names, parse_timeline,
 from .map_canvas import MapCanvas
 from .playback import PlaybackBar
 from .timeline_canvas import TimelineCanvas
-from .widgets import (ACCENT, ACCENT_SOFT, BG, BG_DEEP, BG_INPUT, BG_PANEL,
+from .widgets import (ACCENT, ACCENT_SOFT, ACCENT_TXT, BG, BG_DEEP, BG_INPUT,
+                      BG_PANEL,
                       BG_SUNKEN, BORDER, ComboBox, DIVIDER, FG, FG_DIM,
                       FONT_NUM, FONT_UI, FS_BODY, FS_MICRO, FS_NUM, FS_SMALL,
                       FS_TITLE, PAD_L, PAD_M, PAD_S, PAD_XS, SectionFrame,
                       harmonize)
 
-#: 分类卡片的强调色（只影响标题与数字，保持整体深色基调）
+#: 分类卡片的强调色。
+#:
+#: 全部统一为 ACCENT（和「伤害计算」同一支蓝）。以前 12 类关卡各配一个
+#: 色相（紫/橙/绿/青/粉……），寻路首页看着比伤害计算页花得多，而且这些
+#: 颜色和地图里的路线配色、机制机关配色互相干扰——用户在地图上看到一抹
+#: 橙，分不清那是「活动关卡」的标签色还是「陷阱机关」。
+#:
+#: 现在分类只靠文字识别，颜色只表达「这是本页的强调元素」。
 _CAT_ACCENT = {
-    "main": "#4ea1f7",
-    "sidestory": "#9b59b6",
-    "branchline": "#e67e22",
-    "activity": "#2ecc71",
-    "weekly": "#1abc9c",
-    "campaign": "#f39c12",
-    "tower": "#3498db",
-    "crisis": "#e84393",
-    "roguelike": "#00b894",
-    "sandbox": "#d35400",
-    "guide": "#7f8b9c",
-    "other": "#7f8b9c",
+    "main":       ACCENT,
+    "sidestory":  ACCENT,
+    "branchline": ACCENT,
+    "activity":   ACCENT,
+    "weekly":     ACCENT,
+    "campaign":   ACCENT,
+    "tower":      ACCENT,
+    "crisis":     ACCENT,
+    "roguelike":  ACCENT,
+    "sandbox":    ACCENT,
+    "guide":      FG_DIM,
+    "other":      FG_DIM,
 }
+
+#: 分类卡片在「未分类」时统一用 ACCENT，避免 .get 的默认值和表里不一致。
+_DEFAULT_CAT_ACCENT = ACCENT
 
 
 class PathPanel(ttk.Frame):
@@ -57,7 +68,13 @@ class PathPanel(ttk.Frame):
         self.catalog: Optional[StageCatalog] = None
         self._groups: List[StageGroup] = []
         self._stages: List[Stage] = []
+        # 第三层「节点类型」当前可选列表，元素为 (key, 显示名, 数量)
+        self._node_types: List[tuple] = []
         self._adversity_map: Dict[str, Stage] = {}
+        #: 当前关卡的地图相对路径（缓存是按它落盘的），出怪列表要用
+        self._cur_rel_path: str = ""
+        #: 用户是否亲手勾过「撇除无害单位」；勾过就不再按关卡自动改默认值
+        self._harmless_touched: bool = False
 
         self._build()
 
@@ -189,7 +206,7 @@ class PathPanel(ttk.Frame):
 
     def _make_cat_card(self, master, key, name, desc, n_stages, n_groups):
         """一张分类卡片：标题 + 关数 + 说明，整卡可点。"""
-        accent = _CAT_ACCENT.get(key, ACCENT)
+        accent = _CAT_ACCENT.get(key, _DEFAULT_CAT_ACCENT)
         card = tk.Frame(master, background=BG_PANEL, highlightthickness=1,
                         highlightbackground=DIVIDER, cursor="hand2")
         body = tk.Frame(card, background=BG_PANEL)
@@ -292,12 +309,36 @@ class PathPanel(ttk.Frame):
         self.cmb_group.pack(side="left", padx=(0, PAD_S))
         self.cmb_group.bind("<<ComboboxSelected>>", lambda e: self._on_group())
 
+        # ---- 第三层：肉鸽节点类型（作战 / 紧急作战 / 险路恶敌 …）
+        # 只在集成战略下出现，其他分类没有这一层，所以默认 pack_forget。
+        self.lbl_node = lbl("节点")
+        self.var_node = tk.StringVar()
+        self.cmb_node = ComboBox(top, textvariable=self.var_node, width=12,
+                                 state="readonly", values=[])
+        self.cmb_node.bind("<<ComboboxSelected>>", lambda e: self._on_node())
+
         lbl("关卡").pack(side="left", padx=(0, 3))
         self.var_level = tk.StringVar()
-        self.cmb_level = ComboBox(top, textvariable=self.var_level, width=24,
+        self.cmb_level = ComboBox(top, textvariable=self.var_level, width=22,
                                   state="readonly", values=[])
         self.cmb_level.pack(side="left", padx=(0, PAD_S))
         self.cmb_level.bind("<<ComboboxSelected>>", lambda e: self.load_selected())
+
+        # 文字搜索：图多了以后，只靠分类/主题/节点三层下拉还是难定位。
+        # 这里按关卡显示名、关卡 id、主题名模糊匹配，实时收窄第四层下拉。
+        lbl("搜索").pack(side="left", padx=(PAD_S, 3))
+        self.var_search = tk.StringVar()
+        ent_search = tk.Entry(top, textvariable=self.var_search, width=14,
+                              background=BG_INPUT, foreground=FG,
+                              insertbackground=FG, relief="flat",
+                              font=(FONT_UI, FS_BODY),
+                              highlightthickness=1, highlightbackground=BORDER,
+                              highlightcolor=ACCENT)
+        ent_search.pack(side="left", ipady=3, padx=(0, PAD_S))
+        ent_search.bind("<KeyRelease>", lambda e: self._on_search())
+        self.lbl_search = tk.Label(top, text="", background=BG_PANEL,
+                                   foreground=ACCENT, font=(FONT_UI, FS_SMALL))
+        self.lbl_search.pack(side="left", padx=(0, PAD_S))
 
         self.btn_load = ttk.Button(top, text="加载地图", style="Accent.TButton",
                                    command=self.load_selected)
@@ -494,10 +535,38 @@ class PathPanel(ttk.Frame):
             highlightbackground=BORDER, cursor="hand2",
             padx=8, pady=0, command=self._clear_paths)
         self.btn_clear_paths.pack(side="right")
+
+        # 无害单位过滤：isUnharmfulAndAlwaysCountAsKilled 的怪（平民、演出
+        # 单位、无限刷新的分身）在解包数据里确实有出场记录，但实机里既不
+        # 打人也不挡路、还不计入「剩余敌人总数」。默认**显示**（它们在图
+        # 上是真的会出现的），但给一个开关撇掉，方便对照实机观感。
+        spawn_bar = tk.Frame(sec_tables.body, background=BG_PANEL)
+        spawn_bar.pack(fill="x")
+        # 「只列实机真会出的怪」：折叠 hiddenGroup 互斥组（普通/突袭写在同一份
+        # waves 里，实机一局只出其中一组）+ 剔除 isValid=False 的废案。
+        # act1multi_06 因此从 955 只降到 547 只，act36side_ex03 从 273 只降到 0。
+        self.var_effective_only = tk.BooleanVar(value=True)
+        self.chk_effective = tk.Checkbutton(
+            spawn_bar, text="按实机编队", variable=self.var_effective_only,
+            background=BG_PANEL, foreground=FG_DIM,
+            activebackground=BG_PANEL, activeforeground=ACCENT,
+            selectcolor=BG_DEEP, font=(FONT_UI, FS_MICRO),
+            highlightthickness=0, bd=0, cursor="hand2",
+            command=self._toggle_harmless)
+        self.chk_effective.pack(side="right", padx=(0, PAD_XS))
+        self.var_hide_harmless = tk.BooleanVar(value=False)
+        self.chk_harmless = tk.Checkbutton(
+            spawn_bar, text="撇除无害单位", variable=self.var_hide_harmless,
+            background=BG_PANEL, foreground=FG_DIM,
+            activebackground=BG_PANEL, activeforeground=ACCENT,
+            selectcolor=BG_DEEP, font=(FONT_UI, FS_MICRO),
+            highlightthickness=0, bd=0, cursor="hand2",
+            command=self._toggle_harmless)
+        self.chk_harmless.pack(side="right", padx=(0, PAD_XS))
         self.lbl_spawn_hint = tk.Label(
-            sec_tables.body, text="载入关卡后显示", background=BG_PANEL,
+            spawn_bar, text="载入关卡后显示", background=BG_PANEL,
             foreground=FG_DIM, font=(FONT_UI, FS_MICRO), anchor="w")
-        self.lbl_spawn_hint.pack(fill="x")
+        self.lbl_spawn_hint.pack(side="left", fill="x", expand=True)
 
         # 滚动区：怪物多的时候能滚
         wrapc = tk.Frame(sec_tables.body, background=BG_PANEL)
@@ -566,6 +635,10 @@ class PathPanel(ttk.Frame):
         磨难/突袭变体的 stage_id 带 ``#f#`` 后缀，缓存文件可能落在
         普通版 id 下（见 ``maps.get_level`` 的 fallback 逻辑），所以两
         种 id 都要查。
+
+        肉鸽关卡要额外按 **rel_path** 查：1033 个 stage_id 只对应 638 张
+        地图（换皮图共用），而缓存是按路径存的。只比 stage_id 的话，
+        下好的图会全部显示 ○，用户以为没有缓存、每次重下。
         """
         if not self.catalog:
             return
@@ -573,11 +646,21 @@ class PathPanel(ttk.Frame):
             cached = set(self.app.level_cache.list_cached())
         except Exception:
             cached = set()
+
+        def _rel_key(rel: str) -> str:
+            safe = (rel or "").replace("/", "_").replace("\\", "_")
+            return safe[:-5] if safe.endswith(".json") else safe
+
         for st in self.catalog.stages.values():
             if st.cached:
                 continue
             base = st.stage_id.split("#", 1)[0]
-            st.cached = st.stage_id in cached or base in cached
+            hit = st.stage_id in cached or base in cached
+            if not hit:
+                rel = getattr(st, "path", "") or ""
+                if rel and _rel_key(rel) in cached:
+                    hit = True
+            st.cached = hit
 
     def _cat_key(self) -> str:
         name = self.var_cat.get()
@@ -601,18 +684,113 @@ class PathPanel(ttk.Frame):
             self.cmb_level.config(values=[])
             self.var_group.set("")
             self.var_level.set("")
+            self._hide_node_layer()
+
+    # ---------------------------------------------------------- 第三层：节点
+
+    def _hide_node_layer(self) -> None:
+        """收起「节点」这一层（非集成战略分类没有节点类型）。"""
+        self._node_types = []
+        try:
+            self.cmb_node.config(values=[])
+            self.var_node.set("")
+            self.cmb_node.pack_forget()
+            self.lbl_node.pack_forget()
+        except Exception:
+            pass
+
+    def _show_node_layer(self, group) -> None:
+        """按当前主题里实际存在的节点类型，铺开第三层下拉。
+
+        只列真有的类型，并带上数量，方便一眼看出这个主题里有多少
+        「紧急作战」「险路恶敌」。选「全部节点」等于不加这一层筛选。
+        """
+        try:
+            types = self.catalog.node_types_in(group.group_id)
+        except Exception:
+            types = []
+        if not types:
+            self._hide_node_layer()
+            return
+        self._node_types = types
+        values = ["全部节点（%d）" % sum(n for _k, _l, n in types)]
+        values += ["%s（%d）" % (label, n) for _k, label, n in types]
+        self.lbl_node.pack(side="left", padx=(0, 3), before=self.cmb_level)
+        self.cmb_node.config(values=values)
+        self.cmb_node.pack(side="left", padx=(0, PAD_S), before=self.cmb_level)
+        self.var_node.set(values[0])
+
+    def _node_key(self) -> str:
+        """第三层当前选中的节点类型 key；「全部节点」返回空串。"""
+        text = self.var_node.get()
+        if not text or text.startswith("全部节点"):
+            return ""
+        for key, label, _n in getattr(self, "_node_types", []):
+            if text.startswith(label):
+                return key
+        return ""
+
+    def _on_node(self) -> None:
+        g = self._current_group()
+        if g is None:
+            return
+        self._fill_levels(g)
 
     def _on_group(self) -> None:
+        g = self._current_group()
+        if g is None:
+            return
+        if (g.group_id or "").startswith("rogue"):
+            self._show_node_layer(g)
+        else:
+            self._hide_node_layer()
+        self._fill_levels(g)
+
+    def _current_group(self):
         text = self.var_group.get()
-        g = None
         for cand in self._groups:
             if cand.label == text:
-                g = cand
-                break
+                return cand
+        return None
+
+    def _on_search(self) -> None:
+        """搜索词变化时重新收窄关卡下拉（分类/主题/节点层不动）。
+
+        只在当前主题里过滤，不做跨主题的全局搜索——用户已经先选好
+        主题再搜名字，比「一搜跳来跳去」更可预期。搜索词清空后恢复
+        当前主题的完整关卡列表。
+        """
+        g = self._current_group()
+        if g is None:
+            return
+        self._fill_levels(g)
+
+    def _fill_levels(self, g) -> None:
+        """按「小组 [+ 节点类型] [+ 搜索词]」把关卡填进第四层下拉。"""
+        node = self._node_key()
+        if node:
+            try:
+                pool = list(self.catalog.stages_in(g.group_id, node))
+            except Exception:
+                pool = [st for st in g.stages if st.node_type == node]
+        else:
+            pool = list(g.stages)
+        # 文字搜索：命中关卡显示名 / 关卡 id / 主题名，不区分大小写。
+        # 匹配用「拼出来的显示串」，这样用户敲 ISW-DF、ro1_b 这类 id
+        # 或「开门请当心」这种关卡名都能命中。
+        q = (getattr(self, "var_search", None) or tk.StringVar()).get()
+        q = q.strip().lower()
+        if q:
+            def _blob(st):
+                return " ".join((
+                    st.label, st.stage_id, st.code, st.name,
+                    getattr(st, "sub_name", "") or "",
+                    g.name or "",
+                )).lower()
+            pool = [st for st in pool if q in _blob(st)]
         # 同一关会同时存在普通版与磨难/突袭版（stage_id 带 #f# 后缀），
         # 显示名相同但难度不同。下拉里两个都保留、加后缀区分，
         # 普通版排在前面（默认选中普通版）。
-        pool = list(g.stages) if g else []
         pool.sort(key=lambda st: (st.difficulty_label != "", st.stage_id))
         self._stages = pool
         values = []
@@ -624,6 +802,13 @@ class PathPanel(ttk.Frame):
             values.append("%s%s %s" % (mark, tag, st.label))
         self.cmb_level.config(values=values)
         self.var_level.set(values[0] if values else "")
+        # 搜索词生效时给个小结；没搜到时明确提示，别让用户以为下拉坏了。
+        if hasattr(self, "lbl_search"):
+            if q:
+                self.lbl_search.config(
+                    text=("%d 项" % len(pool)) if pool else "无匹配")
+            else:
+                self.lbl_search.config(text="")
         # 只有当前组里存在「磨难」变体时才显示一键跳转按钮。
         self._adversity_map = {
             st.stage_id.split("#", 1)[0]: st
@@ -693,10 +878,17 @@ class PathPanel(ttk.Frame):
         # 高亮同理：上一条图的敌人 id 在新图上可能撞名
         self.canvas.highlight_enemy = None
         self._clear_trail()      # 换图丢弃上一条路线的拖尾残留
+        # 记下当前关卡 id / 相对路径，_load_enemies 与空出怪原因都要用。
+        # 以前只在 _load_enemies 之后才写 _cur_rel_path，而 _load_timeline
+        # 和 _load_enemies 都已经在读它——顺序反了，首帧永远拿到上一张图的
+        # 路径（换图后出怪数报 -1 的根因之一）。
+        self._cur_level_id = st.stage_id
+        self._cur_rel_path = getattr(st, "path", "") or ""
         # 先取时间轴，recompute 里的路线表要按它统计出怪数
-        self._load_timeline(st.stage_id, gm)
+        self._load_timeline(st.stage_id, gm, rel_path=self._cur_rel_path)
+        self._auto_harmless_default()
         self.recompute()
-        self._load_enemies(st.stage_id)
+        self._load_enemies(st.stage_id, self._cur_rel_path)
         self.app.status.set(
             "%s　%s×%s　路线 %d 条　出怪 %d 只　时长 %.0fs"
             % (st.label, gm.width, gm.height, len(gm.routes),
@@ -722,8 +914,16 @@ class PathPanel(ttk.Frame):
 
         return lookup
 
-    def _load_timeline(self, level_id: str, gm: GameMap) -> None:
-        raw = self.app.level_cache.load(level_id)
+    def _load_timeline(self, level_id: str, gm: GameMap,
+                       rel_path: str = "") -> None:
+        """读出怪时间轴。
+
+        缓存键优先用**地图相对路径**：肉鸽里「紧急作战」和「普通作战」
+        是同一张地图文件（levelId 完全相同，只有 difficulty 不同），
+        按 stage_id 存会各存一份；而地图文件本身是按 rel_path 缓存的，
+        只查 stage_id 就永远是空的——表现出来是出怪数为 -1。
+        """
+        raw = self._raw_for(level_id, rel_path)
         if not raw:
             self.timeline = None
             self.timeline_canvas.set_timeline(None)
@@ -774,15 +974,121 @@ class PathPanel(ttk.Frame):
         except Exception:
             pass
 
-    def _load_enemies(self, level_id: str) -> None:
+    def _spawn_hint_text(self) -> str:
+        """出怪列表上方的说明，带上当前筛选状态。"""
+        base = "点任意一行只看这条路线（再点退出）"
+        tl = self.timeline
+        if not tl:
+            return base
+        bits = []
+        if self.var_effective_only.get():
+            n_dis = tl.disabled_count
+            if n_dis:
+                bits.append("已剔 %d 条未启用" % n_dis)
+            gs = tl.hidden_groups()
+            if gs:
+                bits.append("编队择一（%s）" % "/".join(gs))
+            # 随机候选包（randomSpawnGroupKey）：同组按 weight 抽一条，
+            # 全列会把「N 选 1」显示成 N 只，正是用户报的「多出敌人」。
+            packs = tl.random_pack_summary()
+            if packs:
+                n_cut = sum(int(p["total"] - round(p["expect"])) for p in packs)
+                bits.append("随机包择一（%d 包，少算 %d 只）"
+                            % (len(packs), max(0, n_cut)))
+        n_harm = getattr(tl, "harmless_count", 0)
+        if n_harm:
+            if self.var_hide_harmless.get():
+                bits.append("已撇除 %d 个无害单位" % n_harm)
+            else:
+                bits.append("含 %d 个无害单位" % n_harm)
+        if not bits:
+            return base
+        return base + "　·　" + "　·　".join(bits)
+
+    def _auto_harmless_default(self) -> None:
+        """按关卡自动决定「撇除无害单位」的默认勾选。
+
+        用户报「H8-4 多出平民」——那 3 只其实是 `enemy_3001_upeopl`
+        （乌萨斯平民），带 `isUnharmfulAndAlwaysCountAsKilled`，实机里确实
+        会出场、能被打，只是不计数。它们躺在出怪表里，看起来就像凭空多出来
+        的敌人，所以默认该藏。
+
+        但不能一刀切成默认隐藏：全库有 38 个关卡**全部**出怪都是无害单位
+        （`act1museum_*` 多索雷斯博物馆系列每关 34~142 条全是），隐藏后这
+        些关的出怪表会直接变空，等于把「多出平民」换成「什么都没有」。
+        所以按关卡自适应——只在这关还有货真价实的敌人时，才把无害的折叠掉。
+        用户手动勾过就尊重用户的选择，不再自动改。
+        """
+        tl = self.timeline
+        if tl is None or getattr(self, "_harmless_touched", False):
+            return
+        evs = tl.effective_events()
+        if not evs:
+            return
+        n_harm = sum(1 for e in evs if e.harmless)
+        # 全是有害才算「这关有真敌人」；全是无害就保持显示，否则表格会空
+        self.var_hide_harmless.set(0 < n_harm < len(evs))
+
+    def _toggle_harmless(self) -> None:
+        """勾选「撇除无害单位」后重建出怪列表。
+
+        只重建列表，不重新下载/解析地图——先把说明文字刷新了，即使还没
+        选关卡也能立刻看到勾选框的反馈。
+
+        置 `_harmless_touched`：用户一旦自己动过这个勾，换关时就不再按
+        新关卡的数据自动改默认值，免得把人手选的偏好悄悄顶掉。
+        """
+        self._harmless_touched = True
+        self.lbl_spawn_hint.config(text=self._spawn_hint_text())
+        if self.game_map:
+            self._load_enemies(self.game_map.level_id or "",
+                               getattr(self, "_cur_rel_path", ""))
+
+    def _raw_for(self, level_id: str, rel_path: str = "") -> Optional[dict]:
+        """按与 ``get_level`` / ``_load_timeline`` 一致的候选链取关卡原始 JSON。
+
+        缓存是**按地图相对路径**落盘的（肉鸽等场景里两个 stage 共用同一份
+        地图文件），而 ``stage_id`` 常常带 ``#f#`` 之类的后缀、或干脆与
+        文件名不同。只用 ``stage_id`` 当键会命中不到 —— 表现就是「左侧地图
+        显示正常、右侧本关出怪空白」。全库 4521 关里有 1716 关是这个原因
+        （984 关需要 rel_path、721 关需要去 ``#`` 后缀）。
+        """
+        cache = self.app.level_cache
+        cands = []
+        if rel_path:
+            key = rel_path[:-5] if rel_path.endswith(".json") else rel_path
+            cands.append(key)
+        cands.append(level_id)
+        if "#" in level_id:
+            cands.append(level_id.split("#", 1)[0])
+        for k in cands:
+            if not k:
+                continue
+            raw = cache.load(k)
+            if raw:
+                return raw
+        return None
+
+    def _load_enemies(self, level_id: str, rel_path: str = "") -> None:
         """填「本关出怪」图标网格。
 
         每个出怪项显示 PRTS 怪物头像 + 名称 + 数量 / 首现时间，
         点图标弹出怪物图鉴（特性、技能、抗性）。
         """
-        raw = self.app.level_cache.load(level_id)
+        raw = self._raw_for(level_id, rel_path)
         self.enemies = []
         self._spawn_rows = []
+        self._spawn_wait = {}
+        # 清空整块出怪表，不能只销毁 _spawn_tiles 里登记的行。
+        # 表头 head 和「本关全部 isValid=false」那种空提示 Label 是直接
+        # grid 到 spawn_host 上的、没登记进 _spawn_tiles，只清后者会让它们
+        # 越堆越多：同一关连点 5 次子控件数 8→9→10→11→12，来回切 20 次
+        # 能叠出 10 份同样的 isValid 文案，糊成一片。
+        for w in list(self.spawn_host.winfo_children()):
+            try:
+                w.destroy()
+            except Exception:
+                pass
         for w in self._spawn_tiles:
             try:
                 w.destroy()
@@ -807,6 +1113,19 @@ class PathPanel(ttk.Frame):
         lookup = self._enemy_name_lookup()
         lib = self.app.enemy_lib
         overrides = level_enemy_overrides(raw) or {}
+        # 出场罚站（角兽的【休憩】）：这**不在路线里**，路线的 checkpoints
+        # 可能是空数组（咩的朋友 33 条路线全是），只看路线会显示 0 秒，
+        # 与沙盘对不上。时长在敌人天赋 Revive.unmovable_duration 上。
+        self._spawn_wait = {}
+        for ref in (raw.get("enemyDbRefs") or []):
+            if not isinstance(ref, dict):
+                continue
+            eid = ref.get("id")
+            if not eid:
+                continue
+            _w = spawn_unmovable_of_ref(ref)
+            if _w > 0.01:
+                self._spawn_wait[eid] = _w
 
         rows = []
         for eid in ids:
@@ -825,13 +1144,16 @@ class PathPanel(ttk.Frame):
                 self.enemies.append(st)
 
         self.lbl_spawn_hint.config(
-            text="点任意一行只看这条路线（再点退出）")
+            text=self._spawn_hint_text())
 
         # PRTS 风格逐条排列：按出场顺序一行一行往下，而不是按种类汇总。
         # 用户明确要求参考 https://map.ark-nights.com/map/hard_08-04
         # 的「本关出怪」表：序号 | 头像+名称 | 数量 | 间隔 | 时间点 |
         # 阶段时间点 | 路线。
-        groups = self.timeline.groups() if self.timeline else []
+        groups = (self.timeline.groups(hostile_only=self.var_hide_harmless.get(),
+                                       effective=self.var_effective_only.get(),
+                                       fold_random=self.var_effective_only.get())
+                  if self.timeline else [])
 
         # 表头
         head = tk.Frame(self.spawn_host, background=BG_PANEL)
@@ -847,10 +1169,11 @@ class PathPanel(ttk.Frame):
                                                     sticky="ew", padx=1)
 
         if not groups:
-            tk.Label(self.spawn_host, text="（本关没有可解析的出怪记录）",
+            tk.Label(self.spawn_host, text=self._empty_spawn_reason(),
                      background=BG_PANEL, foreground=FG_DIM,
-                     font=(FONT_UI, FS_MICRO), anchor="w").grid(
-                row=1, column=0, sticky="ew")
+                     font=(FONT_UI, FS_MICRO), anchor="w",
+                     justify="left", wraplength=430).grid(
+                row=1, column=0, sticky="ew", pady=(2, 0))
             return
 
         rows = []
@@ -859,6 +1182,166 @@ class PathPanel(ttk.Frame):
         for gi, row in enumerate(rows):
             row.grid(row=gi + 1, column=0, sticky="ew", padx=0, pady=0)
             self._spawn_tiles.append(row)
+        # 记下这些行，_clear_isolation() 要靠它把选中高亮复位。
+        # 以前这里只用局部变量 rows，self._spawn_rows 一直是空列表，
+        # 于是「清空地图上的路径线」之后出怪表里那一行的边框不会恢复。
+        self._spawn_rows = rows
+
+    def _why_no_events(self) -> str:
+        """一条 SPAWN 都没有时，说清**为什么**——光说「本就不出怪」会误导。
+
+        零事件有几种完全不同的成因，用户看到的都是同一片空白：
+
+        * 这一关压根没有敌人（剧情/教学关）
+        * 有敌人，但走的是 **预置激活**——``ACTIVATE_PREDEFINED`` 把
+          ``predefines`` 里预置好的敌人一次性激活。``act1enemyduel_02a``
+          的 43 条 action 全是它，``enemyDbRefs`` 里有 36 个敌人，
+          说「本就不出怪」是错的，应该说「由预置激活，读不出时间点」。
+        * 只有剧情/演出 action（``STORY`` / ``PLAY_OPERA`` / ``PLAY_BGM``）
+        * waves 里连 fragment 都没有（``act1enemyduel_01b``）
+
+        这里**只读原始 JSON 做判断**，不碰解析逻辑，也不改 ``Timeline``。
+        """
+        raw = None
+        try:
+            raw = self._raw_for(getattr(self, "_cur_level_id", "") or
+                                (self.game_map.level_id if self.game_map else ""),
+                                getattr(self, "_cur_rel_path", "") or "")
+        except Exception:
+            raw = None
+        if not isinstance(raw, dict):
+            return "（这一关的数据里没有出怪记录——纯演出/机制关，本就不出怪）"
+
+        from akcalc.core.timeline import _num_enum
+
+        counts = {}
+        n_actions = 0
+        for w in (raw.get("waves") or []):
+            if not isinstance(w, dict):
+                continue
+            for fr in (w.get("fragments") or []):
+                if not isinstance(fr, dict):
+                    continue
+                for a in (fr.get("actions") or []):
+                    if not isinstance(a, dict):
+                        continue
+                    n_actions += 1
+                    k = _num_enum(a.get("actionType")) or "?"
+                    counts[k] = counts.get(k, 0) + 1
+        n_refs = len(raw.get("enemyDbRefs") or [])
+
+        # 有 SPAWN 却解析不出事件：这才是真正的解析异常，必须说清
+        if counts.get("SPAWN") or counts.get("SPAWN_EXTRA"):
+            return ("（本关有 %d 条出怪动作，但都没解析成时间点——"
+                    "可能缺少路线或出怪点坐标，属数据异常）"
+                    % (counts.get("SPAWN", 0) + counts.get("SPAWN_EXTRA", 0)))
+
+        if counts.get("ACTIVATE_PREDEFINED") or counts.get(
+                "ACTIVATE_PREDEFINED_GROUP"):
+            n_pre = (counts.get("ACTIVATE_PREDEFINED", 0)
+                     + counts.get("ACTIVATE_PREDEFINED_GROUP", 0))
+            return ("（本关 %d 条出怪动作全是「预置激活」ACTIVATE_PREDEFINED，"
+                    "敌人（%d 个）由关卡预置字段在运行时激活，"
+                    "解包数据里没有各自的出场时间点；"
+                    "这类多为人机对战/对决关，沙盘不推演其波次）"
+                    % (n_pre, n_refs))
+
+        if n_actions == 0:
+            return ("（这一关的波次数据里没有任何出怪动作——"
+                    "纯演出/机制关，本就不出怪）")
+
+        if n_refs == 0:
+            return "（这一关的数据里没有敌人记录——纯演出/剧情关，本就不出怪）"
+
+        kinds = "、".join("%s×%d" % (k, v)
+                          for k, v in sorted(counts.items(), key=lambda x: -x[1]))
+        return ("（本关 %d 条动作里没有出怪（SPAWN），只有 %s；"
+                "敌人（%d 个）不由波次生成，沙盘无波次可推演）"
+                % (n_actions, kinds, n_refs))
+
+    def _empty_spawn_reason(self) -> str:
+        """出怪列表为空时给出**具体原因**，而不是一句笼统的「没有记录」。
+
+        用户报过「部分关卡右侧没有本关出怪」。空白本身有两种完全不同的成因，
+        界面上必须说清是哪一种，否则看起来像解析失败：
+
+        * 数据里压根没有敌人（纯演出/剧情关、部分教学关）
+        * 有敌人，但全被 ``isValid=False`` 标成废案；或全被「按实机编队」
+          折叠掉了。``act36side_ex03`` 就是 273 条全部 ``isValid=False``。
+        """
+        tl = self.timeline
+        if tl is None:
+            return "（这张地图读不到关卡数据，无法解析出怪）"
+        if not tl.events:
+            return self._why_no_events()
+        n_dis = tl.disabled_count
+        n_all = len(tl.events)
+        if n_dis >= n_all:
+            # 全库扫描的实测口径（2570 个关卡、93630 条 spawn action）：
+            # isValid 只有两种取值——缺省（正常）与 False（废弃），
+            # 没有任何一关出现「部分 False 部分缺省」以外的混合情况会
+            # 让「全部 disabled」误判。所以这里可以断言实机不出怪。
+            # 这类关卡多是「塔防小游戏」式的迷你活动（FD-1 繁荣滋长、
+            # TG-1 双向通风、act36side_ex03）：波次全部 managedByScheduler
+            # 由调度器驱动，模板出怪整体标成未启用，实机靠关卡脚本另行下发。
+            return ("（本关 %d 条出怪在解包数据里全部标记为未启用 isValid=false，"
+                    "属模板波次（多为迷你玩法关），实机由关卡脚本另行下发；"
+                    "取消「按实机编队」可把模板原样列出来）" % n_all)
+        if self.var_effective_only.get():
+            gs = tl.hidden_groups()
+            if gs:
+                return ("（%d 条出怪全被编队择一折叠掉了，分组：%s；"
+                        "取消「按实机编队」可看全量）" % (n_all, "/".join(gs)))
+            packs = tl.random_pack_summary()
+            if packs:
+                return ("（%d 条出怪全被随机候选包择一折叠掉了，共 %d 个包：%s；"
+                        "取消「按实机编队」可看全部备选）"
+                        % (n_all, len(packs),
+                           "/".join(str(p["group"]) for p in packs[:6])))
+        if self.var_hide_harmless.get():
+            # 必须确认**真的全**是无害单位再说这句话。以前只要勾了
+            # 「撇除无害单位」就无条件返回「全是无害单位」——main_08-04
+            # 只有 3 个无害、57 条里有 54 条是敌对，一旦因为别的原因
+            # 让列表空掉，就会把成因说错。
+            n_harm = getattr(tl, "harmless_count", 0)
+            if n_harm >= n_all:
+                return ("（本关 %d 条出怪全是无害单位，已被「撇除无害单位」"
+                        "隐藏；取消勾选即可看到）" % n_all)
+            return ("（本关 %d 条出怪里 %d 个是无害单位、剩下的被其他筛选条件"
+                    "隐藏了；把「撇除无害单位」「按实机编队」都取消可看全量）"
+                    % (n_all, n_harm))
+        return "（本关没有可解析的出怪记录）"
+
+    def _pre_wait_of(self, route_index: int, enemy_id: str = "") -> float:
+        """这条路线开头的「原地罚站」秒数（没有就返回 0）。
+
+        两个来源**相加**，因为它们各管一段时间：
+
+        1. **路线里**的预罚站：路线第一个检查点是 ``WAIT_FOR_SECONDS``
+           时，敌人刷出来之后会先在出生点站着不动，走完这段时间才开始
+           沿路线前进。纵怒 ``ro6_c-6`` 的 route 0/1/2 就是 120s，导致
+           那 3 只领舞者的实战到达时间（143~151s）比关卡时长（139s）
+           还长。
+        2. **敌人天赋**里的【休憩】：角兽出厂自带，写在
+           ``Revive.unmovable_duration``，**完全不在路线上**。咩的朋友
+           ``ro6_c_2`` 的 33 条路线 ``checkpoints`` 全是空数组，只看
+           路线就会显示「罚站 0 秒」，而实机是 90 秒。
+
+        ⚠ 只能按 ``RouteAnalysis.route_index`` 字段查，不能写
+        ``analyses[route_index]``：``motionMode=E_NUM`` 的剧情占位路线在
+        解析时就被丢掉了，列表位置 ≠ 原始下标（全库 1243 关存在错位）。
+        按下标取会静默拿到隔壁那条的罚站时长。
+        """
+        total = 0.0
+        if route_index is not None and route_index >= 0:
+            for a in (getattr(self, "analyses", None) or []):
+                if getattr(a, "route_index", -1) == route_index:
+                    total += float(getattr(a, "pre_wait", 0.0) or 0.0)
+                    break
+        if enemy_id:
+            total += float((getattr(self, "_spawn_wait", None) or {})
+                           .get(enemy_id, 0.0) or 0.0)
+        return total
 
     def _make_spawn_row(self, master, gi: int, g):
         """本关出怪表的一行（可点击隔离该路线）。"""
@@ -895,6 +1378,45 @@ class PathPanel(ttk.Frame):
         cell(g.stage_time_text, 7, "e", FG_DIM)
         cell("R%d" % (g.route_index + 1) if g.route_index >= 0 else "—",
              5, "center", FG_DIM)
+
+        # 分支出怪（branches[]，装置/陷阱触发）：时间点列显示的只是
+        # 「装置开启后相对多久」，不是「这一关第几秒一定出」。不标记的话
+        # 会和波次出怪混在一起，看起来像多出来的敌人。纵怒 ro6_c-6 的
+        # 家族暗影灭迹人就属这类（vgctrl_bro 分支），它和领舞者共用 R0。
+        br = ""
+        try:
+            evs = getattr(g, "events", None) or []
+            br = next((e.branch for e in evs if getattr(e, "branch", "")), "")
+        except Exception:
+            br = ""
+        if br:
+            lb = cell("条件出怪", 9, "center", ACCENT_TXT)
+            _bind_tip(lb, "这一条来自 branches[]「%s」分支，由装置/陷阱触发。"
+                          "时间点列只是相对触发时刻的偏移，"
+                          "不是「本关第几秒一定出」。" % br)
+        else:
+            cell("", 9, "center", FG_DIM)
+
+        # 预罚站（路线第一个检查点就是 WAIT_FOR_SECONDS）标记。
+        # 「时间点」列显示的是**出场**时间；如果敌人出场后原地不动
+        # 上百秒，只看这一列会以为它立刻开始走。纵怒 ro6_c-6 就有
+        # 3 只领舞者出场 0s、预罚站 120s，实到蓝门 143~151s，比关卡
+        # 时长 139s 还长——列表里却和另外 6 只长得一模一样。
+        pw = self._pre_wait_of(g.route_index, eid)
+        if pw > 0.5:
+            lb = cell("罚站%s" % _pw_text(pw), 9, "center", ACCENT_TXT)
+            _route_pw = self._pre_wait_of(g.route_index)
+            _spawn_pw = pw - _route_pw
+            if _spawn_pw > 0.5:
+                tip = ("该敌人天赋带【休憩】：出场后先在出生点站着不动 "
+                       "%.1fs（关卡数据写的是这个数），之后才开始沿路线走。"
+                       "这段时间不在路线上，所以别的面板可能显示 0。"
+                       % _spawn_pw)
+            else:
+                tip = ("这条路线的第一个检查点是「原地等待 %.1fs」，"
+                       "所以该敌出场后先在出生点罚站，%.1fs 后才开始移动"
+                       % (pw, pw))
+            _bind_tip(lb, tip)
 
         # 点击：隔离该路线，并把这只敌人在图上圈出来
         def on_click(_e=None, r=g.route_index, i=eid, s=nm):
@@ -1128,9 +1650,13 @@ class PathPanel(ttk.Frame):
                 gm.max_life, gm.initial_cost, gm.max_cost),
         ]
         if tl and tl.events:
+            # wave_index < 0 表示分支出怪（装置/陷阱触发），不算「波」
+            n_wave = len({e.wave_index for e in tl.events if e.wave_index >= 0})
+            n_branch = len({e.branch for e in tl.events if e.branch})
             lines.append("出怪    %d 只 / %d 波 / 最长 %.0fs"
-                         % (tl.total_spawns, len({e.wave_index for e in tl.events}),
-                            tl.duration))
+                         % (tl.total_spawns, n_wave, tl.duration))
+            if n_branch:
+                lines.append("分支出怪 %d 组（装置/陷阱触发，非波次）" % n_branch)
         self.info.configure(state="normal")
         self.info.delete("1.0", "end")
         self.info.insert("1.0", "\n".join(lines))
@@ -1419,14 +1945,16 @@ class PathPanel(ttk.Frame):
     def _fill_isolate_info(self, route_index: int) -> None:
         """隔离视图下把这条路线的时间/罚站信息写到「敌人详情」栏。"""
         gm = self.game_map
-        if not gm or not (0 <= route_index < len(gm.routes)):
+        if not gm:
+            return
+        route = gm.route_by_index(route_index)
+        if route is None:
             return
         a = None
         for x in self.analyses:
             if x.route_index == route_index:
                 a = x
                 break
-        route = gm.routes[route_index]
         if hasattr(self, "lbl_detail_title"):
             self.lbl_detail_title.config(
                 text="路线 %d（仅显示此线 · 再点一次退出）" % (route_index + 1))
@@ -1453,10 +1981,31 @@ class PathPanel(ttk.Frame):
             lines.append("移动耗时  %.2fs" % a.move_time)
             if a.pre_wait > 0:
                 lines.append("出发罚站  %.1fs ← 在起点的停驻" % a.pre_wait)
+            # 天赋罚站（角兽的【休憩】）：不在路线上，单独一行，免得
+            # 「全程」和沙盘算出来的到达时刻对不上却看不出为什么。
+            _tids = set()
+            try:
+                for _e in (self.timeline.events if self.timeline else []):
+                    if getattr(_e, "route_index", -1) == route_index:
+                        _tids.add(getattr(_e, "enemy_id", ""))
+            except Exception:
+                _tids = set()
+            _tal = 0.0
+            for _tid in _tids:
+                _tal = max(_tal, float((getattr(self, "_spawn_wait", None) or {})
+                                       .get(_tid, 0.0) or 0.0))
+            if _tal > 0.5:
+                lines.append("天赋罚站  %.1fs ← 【休憩】出场自缚（不在路线上）"
+                             % _tal)
             if a.wait_time > 0:
                 lines.append("途中罚站  %.1fs（共 %d 处）"
                              % (a.wait_time, self._count_waits(route)))
-            lines.append("全程      %.2fs" % a.total_time)
+            _grand = a.total_time + _tal
+            if _tal > 0.5:
+                lines.append("全程      %.2fs（含天赋罚站 %.1fs）"
+                             % (_grand, _tal))
+            else:
+                lines.append("全程      %.2fs" % a.total_time)
             if not a.reachable:
                 lines.append("")
                 lines.append("⚠ %s" % a.note)
@@ -1573,6 +2122,54 @@ class PathPanel(ttk.Frame):
                            level: int = 0) -> None:
         """按名字打开怪物图鉴（右栏图标点的就是这条）。"""
         self._open_codex(enemy_id, name, level)
+
+
+def _pw_text(v) -> str:
+    """预罚站秒数的紧凑文本：120.0 -> ``120s``，82.5 -> ``82.5s``。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if abs(f - round(f)) < 0.05:
+        return "%ds" % int(round(f))
+    return "%.1fs" % f
+
+
+def _bind_tip(widget, text: str) -> None:
+    """给一个小控件挂悬停提示（不依赖其它模块，出错静默）。"""
+    state = {"win": None}
+
+    def show(_e=None):
+        if state["win"] is not None:
+            return
+        try:
+            tw = tk.Toplevel(widget)
+            tw.wm_overrideredirect(True)
+            tw.configure(background=BG_DEEP)
+            lbl = tk.Label(tw, text=text, justify="left",
+                           background=BG_DEEP, foreground=FG,
+                           font=(FONT_UI, FS_SMALL), padx=PAD_M, pady=PAD_S,
+                           wraplength=300)
+            lbl.pack()
+            x = widget.winfo_rootx() + 12
+            y = widget.winfo_rooty() + widget.winfo_height() + 4
+            tw.wm_geometry("+%d+%d" % (x, y))
+            state["win"] = tw
+        except Exception:
+            state["win"] = None
+
+    def hide(_e=None):
+        w = state["win"]
+        state["win"] = None
+        if w is not None:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+    widget.bind("<Enter>", show, add="+")
+    widget.bind("<Leave>", hide, add="+")
+    widget.bind("<Destroy>", lambda _e: hide(), add="+")
 
 
 def _fmt_big(v) -> str:

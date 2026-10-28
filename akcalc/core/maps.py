@@ -27,7 +27,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from . import net
-from .models import GameMap, Route, RoutePoint, Tile
+from .models import (GameMap, Route, RoutePoint, Tile, WAIT_SENTINEL_MIN,
+                     checkpoint_kind, clamp_wait_time, motion_mode_name)
 
 GH_API = "https://api.github.com/repos/Kengxxiao/ArknightsGameData"
 GH_HEADERS = {"Accept": "application/vnd.github+json"}
@@ -70,14 +71,32 @@ GOAL_KEYS = {
 # --------------------------------------------------------------- 通行掩码归一化
 
 #: 部分关卡（尤其新章节）的 passableMask 是整数枚举，不是字符串。
+#:
+#: 它是**位掩码**：bit0 = 地面可走，bit1 = 飞行可过。这个解释由 tileKey
+#: 与 mask 的相关性实测标定（全库 25 万格）::
+#:
+#:   tile_road / tile_floor / tile_start / tile_end / tile_telin / tile_telout
+#:       字符串形态一律 ``ALL``，数值形态一律 ``3``  → 3 = ALL
+#:   tile_forbidden / tile_wall
+#:       字符串形态一律 ``FLY_ONLY``，数值形态一律 ``2``  → 2 = FLY_ONLY
+#:
+#: 所以 0/1/2/3 必须依次是 NONE / WALK_ONLY / FLY_ONLY / ALL。
+#: 早期版本把 3 映射成 ``NONE``、把 0 映射成 ``ALL``，导致 102 个老活动关
+#: （act6d5 / act7mini / act10mini / act13mini / act14mini / act1lock …）
+#: 的路面全部被判成不可通行——图能画出来，但每条路线都「无法寻路」。
 _MASK_BY_INT = {
-    0: "ALL", 1: "WALK_ONLY", 2: "FLY_ONLY", 3: "NONE",
+    0: "NONE", 1: "WALK_ONLY", 2: "FLY_ONLY", 3: "ALL",
 }
 
 
 #: 高度枚举。和 passableMask 一样，早期关卡的 heightType 是整数：
 #: 0 = LOWLAND（地面），1 = HIGHLAND（高台）。全库合计 9066 格这样写。
 _HEIGHT_BY_INT = {0: "LOWLAND", 1: "HIGHLAND"}
+
+#: 可部署类型枚举。同样有数值形态（全库 9066 格），由 tileKey 相关性标定：
+#: tile_forbidden/tile_floor/tile_start → 'NONE' 对应 0；tile_road → 'MELEE'
+#: 对应 1；tile_wall → 'RANGED' 对应 2；其余高台可放 → 'ALL' 对应 3。
+_BUILD_BY_INT = {0: "NONE", 1: "MELEE", 2: "RANGED", 3: "ALL"}
 
 
 def _norm_height(v) -> str:
@@ -96,6 +115,29 @@ def _norm_height(v) -> str:
     if s.isdigit():
         return _HEIGHT_BY_INT.get(int(s), "LOWLAND")
     return s or "LOWLAND"
+
+
+def _norm_buildable(v) -> str:
+    """把客户端的 buildableType 归一化成 NONE / MELEE / RANGED / ALL。
+
+    老关卡的 buildableType 是整数枚举（全库 9066 格）。不归一化的话
+    ``Tile.buildable_melee`` / ``buildable_ranged`` 里的 ``in ("MELEE","ALL")``
+    全都判 False，表现是「图能画出来、路也算得通，但任何一个格子都部署不了
+    干员」。映射由 tileKey 相关性标定：tile_road 的 'MELEE' 对应 1、
+    tile_wall 的 'RANGED' 对应 2、tile_forbidden/floor 的 'NONE' 对应 0。
+    """
+    if isinstance(v, bool):
+        return "ALL" if v else "NONE"
+    if isinstance(v, int):
+        return _BUILD_BY_INT.get(v, "NONE")
+    s = str(v or "").strip().upper()
+    if not s:
+        return "NONE"
+    if s.isdigit():
+        return _BUILD_BY_INT.get(int(s), "NONE")
+    if s in ("MELEE", "RANGED", "ALL", "NONE"):
+        return s
+    return "NONE"
 
 
 def _norm_passable(mask) -> str:
@@ -162,8 +204,9 @@ def parse_level(data: dict, level_id: str = "") -> GameMap:
                     row=r, col=c,
                     tile_key=td.get("tileKey", ""),
                     height_type=_norm_height(td.get("heightType", "LOWLAND")),
-                    buildable_type=td.get("buildableType", "NONE"),
+                    buildable_type=_norm_buildable(td.get("buildableType", "NONE")),
                     passable_mask=_norm_passable(td.get("passableMask", "ALL")),
+                    def_index=idx,
                 )
             else:
                 tile = Tile(row=r, col=c, tile_key="", passable_mask="NONE")
@@ -213,7 +256,7 @@ def _parse_route(rt: dict, index: int) -> Route:
     ep = rt.get("endPosition") or {}
     off = rt.get("spawnOffset") or {}
     route = Route(
-        motion_mode=rt.get("motionMode", "WALK"),
+        motion_mode=motion_mode_name(rt.get("motionMode", "WALK")),
         start=(int(sp.get("row", 0)), int(sp.get("col", 0))),
         end=(int(ep.get("row", 0)), int(ep.get("col", 0))),
         allow_diagonal_move=bool(rt.get("allowDiagonalMove", True)),
@@ -223,11 +266,13 @@ def _parse_route(rt: dict, index: int) -> Route:
     for cp in rt.get("checkpoints") or []:
         pos = cp.get("position") or {}
         ro = cp.get("reachOffset") or {}
+        raw_wait = float(cp.get("time", 0.0) or 0.0)
         route.checkpoints.append(RoutePoint(
             row=float(pos.get("row", 0)),
             col=float(pos.get("col", 0)),
-            kind=cp.get("type", "MOVE"),
-            wait_time=float(cp.get("time", 0.0) or 0.0),
+            kind=checkpoint_kind(cp.get("type", "MOVE")),
+            wait_time=clamp_wait_time(raw_wait),
+            wait_sentinel=raw_wait >= WAIT_SENTINEL_MIN,
             reach_offset=(float(ro.get("x", 0.0) or 0.0),
                           float(ro.get("y", 0.0) or 0.0)),
         ))
@@ -344,14 +389,44 @@ def get_level(level_id: str, category: str = "main",
     对应的独立文件（``#`` 在 URL 里是锚点，请求必然失败），而它的地形与
     出怪和普通版一致。所以带 ``#`` 的关卡先直接命中普通版，失败了再按
     原 id 试一次，避免用户选到这类关卡时白屏。
+
+    **缓存键统一用 rel_path**（拿得到的话）。肉鸽关卡一个 levelId 对应
+    多张地图（换皮图），1033 个 stage_id 只映射到 638 个文件；如果按
+    stage_id 存，同一张图会被重复下载多次，而且 ``list_cached()`` 返回
+    的是文件名，跟 stage_id 永远对不上——列表里明明下过却全显示 ○。
     """
     fallback = level_id.split("#", 1)[0] if "#" in level_id else ""
 
+    def _key(rel: str, sid: str) -> str:
+        """缓存键：优先用地图相对路径，退回落 stage_id。
+
+        注意要去掉 ``.json`` 后缀——``LevelCache._path`` 自己会加，
+        传 ``levels/.../x.json`` 进去会变成 ``x.json.json``，
+        于是所有缓存都读不中、每次重新下载。
+        """
+        k = rel or sid
+        if k.endswith(".json"):
+            k = k[:-5]
+        return k
+
+    # 候选缓存键：rel_path 优先，其次 stage_id（兼容旧缓存布局）
+    keys: List[str] = []
+    if rel_path:
+        keys.append(_key(rel_path, level_id))
+    keys.append(level_id)
+    if fallback:
+        if rel_path:
+            keys.append(_key(rel_path.split("#", 1)[0], fallback))
+        keys.append(fallback)
+
     data: Optional[dict] = None
+    used_key = ""
     if cache:
-        data = cache.load(level_id)
-        if data is None and fallback:
-            data = cache.load(fallback)
+        for k in keys:
+            data = cache.load(k)
+            if data is not None:
+                used_key = k
+                break
     if data is None:
         target_id, target_rel = level_id, rel_path
         if fallback:
@@ -362,7 +437,15 @@ def get_level(level_id: str, category: str = "main",
         except net.FetchError:
             return None
         if cache:
-            cache.save(level_id, data)
+            # 按 rel_path 落盘，和批量下载/别的关卡共用同一份
+            cache.save(_key(target_rel or rel_path, level_id), data)
+    elif cache and used_key != _key(rel_path, level_id):
+        # 老布局（stage_id 命名）命中：顺手写成 rel_path 键，
+        # 这样下次 list_cached() 也能认出来
+        try:
+            cache.save(_key(rel_path, level_id), data)
+        except Exception:
+            pass
     return parse_level(data, level_id)
 
 

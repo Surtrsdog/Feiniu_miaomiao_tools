@@ -37,6 +37,14 @@ CATEGORY_ORDER = [
     ("other", "其他"),
 ]
 
+#: 关卡目录的 schema 版本。
+#: 每次「改了目录该有哪些分类/字段」就 +1，旧 catalog.json 会被判定
+#: 过期并自动重建。否则老用户升级后仍读旧缓存——比如 v1 的目录里
+#: 根本没有肉鸽关卡，界面就会一直没有「集成战略」分类。
+#:   v2: 加入集成战略（肉鸽）
+#:   v3: 肉鸽关卡加 node_type（作战/紧急作战/险路恶敌…），用于三层筛选
+CATALOG_SCHEMA = 3
+
 #: 分类 -> 一句说明，显示在分类主菜单的卡片上
 CATEGORY_DESC = {
     "main": "第 0~14 章主线剧情，按章节推进",
@@ -87,6 +95,7 @@ class Stage:
     difficulty: str = ""
     cost: int = 0
     cached: bool = False     # 本地已有地图文件，无需联网
+    node_type: str = ""      # 肉鸽节点类型（作战/紧急作战/险路恶敌…），非肉鸽为空
 
     @property
     def label(self) -> str:
@@ -105,7 +114,16 @@ class Stage:
 
     @property
     def difficulty_label(self) -> str:
-        """难度的中文短标签，普通关返回空串。"""
+        """难度的中文短标签，普通关返回空串。
+
+        主线/活动的 FOUR_STAR 是「磨难」，但**肉鸽里同一关的困难版是
+        「紧急作战」**（普通作战 vs 紧急作战共用一张图），标成磨难会
+        让人以为是主线那种突袭难度的独立关卡。
+        """
+        if self.category == "roguelike":
+            if self.node_type == "emergency" or self.difficulty == "FOUR_STAR":
+                return "紧急"
+            return ""
         if self.difficulty == "FOUR_STAR":
             return "磨难"
         if self.difficulty == "SIX_STAR":
@@ -272,9 +290,44 @@ def guess_path(stage_id: str, zone_id: str = "",
         return "levels/activities/%s/level_%s.json" % (adir, stage_id)
     if stage_id.startswith("crisis_v2_"):
         return "levels/obt/crisis/v2/level_%s.json" % stage_id
+    # 集成战略（肉鸽）：stage_table 里一条都没有，目录索引靠
+    # roguelike_topic_table 现造（见 build_roguelike_stages），
+    # 地图路径由 levelId 原样小写推导。
+    #
+    # 实测（498/498 命中，0 未命中）：仓库里肉鸽地图的路径就是
+    #     levels/<levelId 小写>.json
+    # 例如 Obt/Roguelike/RO1/level_rogue1_1-1
+    #   -> levels/obt/roguelike/ro1/level_rogue1_1-1.json
+    #     Obt/Roguelike/RO5/DLC1/level_rogue5_sv-1_dlc1
+    #   -> levels/obt/roguelike/ro5/dlc1/level_rogue5_sv-1_dlc1.json
+    #
+    # ⚠ 两个坑都踩过：直接用 levelId 字面量（大写 RO1/DLC1）一律 404，
+    # 必须整条 tolower()。也不能走下面 _OBT_CATEGORIES 的拼接——那条
+    # 会给出 levels/obt/main/level_ro1_n_1_1.json 这种错路径。
+    sid_low = (stage_id or "").lower()
+    if re.match(r"^ro\d", sid_low) or sid_low.startswith("rogue"):
+        return "levels/obt/roguelike/%s/level_%s.json" % (
+            sid_low.split("_", 1)[0], sid_low)
     head = stage_id.split("_", 1)[0] if "_" in stage_id else ""
     cat = head if head in _OBT_CATEGORIES else "main"
     return "levels/obt/%s/level_%s.json" % (cat, stage_id)
+
+
+def roguelike_level_path(level_id: str) -> str:
+    """肉鸽 levelId -> CDN 相对路径。
+
+    ``levelId`` 来自 roguelike_topic_table 的 ``details.rogue_N.stages[*]``，
+    形如 ``Obt/Roguelike/RO1/level_rogue1_1-1``。仓库里的实际路径就是
+    「整体小写」，全文 498 条实测 100% 命中。
+    """
+    lid = (level_id or "").strip().lower()
+    if not lid:
+        return ""
+    if lid.endswith(".json"):
+        lid = lid[:-5]
+    if lid.startswith("levels/"):
+        return lid + ".json"
+    return "levels/%s.json" % lid
 
 
 def classify(stage_type: str, stage_id: str, zone_id: str,
@@ -380,6 +433,166 @@ def _zone_group_name(zone: dict) -> str:
     return second or first or third or ""
 
 
+#: 集成战略主题的展示顺序与中文名。
+#: 官方 ``topics`` 里本来就有 ``name`` 字段（"傀影与猩红孤钻" 等），
+#: 但它是**主题名**，玩家在列表里更习惯看到「IS1 / IS2」这种简称，
+#: 所以拼成「IS1 · 傀影与猩红孤钻」。这个顺序也是游戏内的解锁顺序。
+_ROGUELIKE_TOPIC_LABEL = {
+    "rogue_1": "IS1",
+    "rogue_2": "IS2",
+    "rogue_3": "IS3",
+    "rogue_4": "IS4",
+    "rogue_5": "IS5",
+    "rogue_6": "IS6",
+}
+
+
+#: 肉鸽节点类型 -> 排序权重 / 显示名。
+#:
+#: 依据是 ``roguelike_topic_table`` 里 stage 的 ``code`` 与 ``id`` 前缀：
+#:   * ``ISW-NO`` + id ``ro*_n_*``   普通作战
+#:   * ``ISW-NO`` + id ``ro*_e_*``   紧急作战（精英）
+#:   * ``ISW-DF`` + id ``ro*_b_*``   险路恶敌（首领）
+#:   * ``ISW-SP``/``ISW-DU``         特殊作战（事件/决斗）
+#:   * id ``ro*_t_*``                结局作战
+#:   * id ``ro*_ev_*``               事件节点（不一定是作战）
+#: 这批名字和官方 ``code`` 一一对应，不是我编的。
+ROGUELIKE_NODE_TYPES = [
+    ("normal", "作战"),
+    ("emergency", "紧急作战"),
+    ("boss", "险路恶敌"),
+    ("special", "特殊作战"),
+    ("ending", "结局作战"),
+    ("event", "事件节点"),
+    ("variant", "换皮图"),
+]
+
+ROGUELIKE_NODE_LABEL = dict(ROGUELIKE_NODE_TYPES)
+_ROGUELIKE_NODE_ORDER = {k: i for i, (k, _n) in enumerate(ROGUELIKE_NODE_TYPES)}
+
+
+def roguelike_node_type(raw: dict) -> str:
+    """判定一条肉鸽 stage 属于哪种节点。
+
+    先看 id 前缀（最准：``b``=首领、``t``=结局、``e``=紧急），再看
+    ``code`` 兜底。两者冲突时以 id 为准——官方 ``code`` 有 1 条是空格
+    （萨卡兹某关），靠 code 会判不出来。
+    """
+    sid = (raw.get("id") or "").strip().lower()
+    code = (raw.get("code") or "").strip().upper()
+    # ro1_b_1 / ro4_duel_1 / ro5_dlc1_... 取第二段
+    parts = sid.split("_")
+    head = parts[1] if len(parts) > 1 else ""
+    if head in ("b",):
+        return "boss"
+    if head in ("t",):
+        return "ending"
+    if head in ("e",):
+        return "emergency"
+    if head in ("ev",):
+        return "event"
+    if head in ("duel", "sv", "dv", "fs", "dlc1"):
+        return "special"
+    if head == "n":
+        return "normal"
+    # 前缀认不出来，退到 code
+    if code == "ISW-DF":
+        return "boss"
+    if code in ("ISW-SP", "ISW-DU"):
+        return "special"
+    return "normal"
+
+
+def _add_roguelike_stages(cat: "StageCatalog",
+                          roguelike_topic: dict) -> None:
+    """把集成战略（肉鸽）关卡补进目录。
+
+    为什么必须单独补
+    ----------------
+    ``stage_table.json`` 里**一条肉鸽关卡都没有**（3643 条 stage 的
+    stageType 只有 MAIN / SUB / GUIDE / SPECIAL_STORY / DAILY /
+    ACTIVITY / CAMPAIGN / CLIMB_TOWER，没有 ROGUELIKE），
+    ``zone_table`` 里那 6 个 ``rogue_N`` 分区也是空壳——挂关卡数全是 0。
+    所以「集成战略」分类之前永远是空的，``_ZONE_TYPE_CATEGORY`` 里那条
+    ``"ROGUELIKE": "roguelike"`` 根本走不到。
+
+    真正的关卡清单只在 ``excel/roguelike_topic_table.json`` 的
+    ``details.rogue_N.stages`` 里，每条带 ``levelId``（地图路径）和
+    ``levelReplaceIds``（换皮图，如萨卡兹肉鸽的 91 张替换图）。
+
+    规模：6 主题 / 775 条目 / 498 唯一 levelId / 638 张地图文件。
+    """
+    topics = (roguelike_topic or {}).get("topics") or {}
+    details = (roguelike_topic or {}).get("details") or {}
+
+    def _topic_sort(tid: str):
+        m = re.search(r"(\d+)", tid or "")
+        return (int(m.group(1)) if m else 999, tid)
+
+    for tid in sorted(details.keys(), key=_topic_sort):
+        det = details.get(tid) or {}
+        raw_stages = det.get("stages") or {}
+        if not isinstance(raw_stages, dict):
+            continue
+        topic_name = (topics.get(tid) or {}).get("name") or tid
+        short = _ROGUELIKE_TOPIC_LABEL.get(tid)
+        group_name = ("%s · %s" % (short, topic_name)) if short else topic_name
+
+        for sid, raw in raw_stages.items():
+            if not isinstance(raw, dict):
+                continue
+            if sid in cat.stages:
+                continue
+            level_id = (raw.get("levelId") or "").strip()
+            if not level_id:
+                continue
+            st = Stage(
+                stage_id=sid,
+                code=raw.get("code") or "",
+                name=raw.get("name") or "",
+                zone_id=tid,
+                stage_type="ROGUELIKE",
+                category="roguelike",
+                group_id=tid,
+                group_name=group_name,
+                sub_name="",
+                difficulty=raw.get("difficulty") or "",
+                path=roguelike_level_path(level_id),
+            )
+            # 节点类型：三五层筛选的第三层靠它分组
+            st.node_type = roguelike_node_type(raw)
+            st.sub_name = ROGUELIKE_NODE_LABEL.get(st.node_type, "")
+            cat.stages[sid] = st
+            cat._by_category.setdefault("roguelike", []).append(st)
+
+            # 换皮图：同一关的地图替身（萨卡兹 91 张、岁的界园 49 张）。
+            # 它们是**独立地图文件**，也要能单独选出来，否则那 140 张图
+            # 在界面上完全看不到。
+            for i, rep in enumerate(raw.get("levelReplaceIds") or []):
+                rep_id = (rep or "").strip()
+                if not rep_id:
+                    continue
+                vsid = "%s~r%d" % (sid, i + 1)
+                if vsid in cat.stages:
+                    continue
+                vst = Stage(
+                    stage_id=vsid,
+                    code="",
+                    name="%s（换皮 %d）" % (st.name or sid, i + 1),
+                    zone_id=tid,
+                    stage_type="ROGUELIKE",
+                    category="roguelike",
+                    group_id=tid,
+                    group_name=group_name,
+                    sub_name="换皮图",
+                    difficulty=st.difficulty,
+                    path=roguelike_level_path(rep_id),
+                )
+                vst.node_type = "variant"
+                cat.stages[vsid] = vst
+                cat._by_category.setdefault("roguelike", []).append(vst)
+
+
 def build_permanent_names(zone_table: dict):
     """收集「插曲 / 别传」永久分区的名字集合。
 
@@ -414,7 +627,8 @@ class StageCatalog:
 
     @classmethod
     def build(cls, stage_table: dict, zone_table: dict,
-              paths: Optional[Iterable[str]] = None) -> "StageCatalog":
+              paths: Optional[Iterable[str]] = None,
+              roguelike_topic: Optional[dict] = None) -> "StageCatalog":
         cat = cls()
         zones = (zone_table or {}).get("zones") or {}
         stages_raw = (stage_table or {}).get("stages") or {}
@@ -511,6 +725,10 @@ class StageCatalog:
                 cat.stages[sid] = st
                 cat._by_category.setdefault("crisis", []).append(st)
 
+        # ---- 集成战略（肉鸽）：stage_table 里一条都没有，必须从
+        #      roguelike_topic_table 现造索引。见 build_roguelike_stages。
+        if roguelike_topic:
+            _add_roguelike_stages(cat, roguelike_topic)
 
         cat._build_groups()
         return cat
@@ -553,6 +771,38 @@ class StageCatalog:
     def count_of(self, category: str) -> int:
         return len(self._by_category.get(category) or [])
 
+    def node_types_in(self, group_id: str) -> List[Tuple[str, str, int]]:
+        """某个小组里实际存在的节点类型，返回 (key, 显示名, 数量)。
+
+        只列出真的有内容的类型，按 :data:`ROGUELIKE_NODE_TYPES` 的顺序，
+        界面据此决定第三层下拉该显示哪些项——不会出现「特殊作战 0 关」
+        这种点了什么也没有的选项。
+        """
+        cnt = {}
+        for st in self.stages.values():
+            if st.group_id != group_id:
+                continue
+            nt = st.node_type or ""
+            if not nt:
+                continue
+            cnt[nt] = cnt.get(nt, 0) + 1
+        out = []
+        for key, label in ROGUELIKE_NODE_TYPES:
+            if cnt.get(key):
+                out.append((key, label, cnt[key]))
+        return out
+
+    def stages_in(self, group_id: str, node_type: str = "") -> List[Stage]:
+        """某个小组下的关卡；``node_type`` 非空时按节点类型再筛一层。
+
+        肉鸽一个主题几十到近三百关，只靠一个长下拉很难找。三层筛选
+        （分类 → 主题 → 节点类型）能把它压到十几条。
+        """
+        out = [st for st in self.stages.values() if st.group_id == group_id]
+        if node_type:
+            out = [st for st in out if (st.node_type or "") == node_type]
+        return sorted(out, key=_stage_sort_key)
+
     def total(self) -> int:
         return len(self.stages)
 
@@ -564,7 +814,7 @@ class StageCatalog:
         return None
 
     def to_dict(self) -> dict:
-        return {"stages": [vars(s) for s in self.stages.values()]}
+        return {"v": CATALOG_SCHEMA, "stages": [vars(s) for s in self.stages.values()]}
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -580,6 +830,11 @@ class StageCatalog:
             with open(path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except (OSError, ValueError):
+            return None
+        # 版本对不上就当读不出来，让调用方重建。旧版 catalog 里一条肉鸽
+        # 关卡都没有，可它会被当成本地缓存优先命中——用户装了新版还是
+        # 看不到「集成战略」，只能手动删文件才能恢复。
+        if int(raw.get("v") or 0) != CATALOG_SCHEMA:
             return None
         rows = raw.get("stages") or []
         if not rows:

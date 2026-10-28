@@ -30,6 +30,10 @@ akcalc/data/cache/prts_enemy_wikitext/
 
 # 超大单一数据文件（数 MB 的派生表）
 akcalc/data/skill_table_full.json
+# 肉鸽关卡索引 17MB：能从上游原样再取（见 tools），但它决定「集成战略」
+# 分类有没有内容，打包时必须存在——所以留在版本库里，只是不值得再大些。
+# 这里只忽略再生成时的备份。
+akcalc/data/catalog.json.bak
 
 # ---- 编辑器 / 系统
 .vscode/
@@ -41,5 +45,10 @@ desktop.ini
 
 # ---- 本地配置与临时文件
 akcalc/data/cache/settings.json
+# 图鉴批注是用户自己写的备注，属于本地数据而不是产品数据：程序首次写入时
+# 自动创建，不需要随仓库分发；跟着版本库走反而会被更新覆盖、被测试污染
+# （回归测试曾经往这里写「爱国者一阶段高防」这类假批注）。
+akcalc/data/cache/annotations_enemy.json
+akcalc/data/cache/annotations_operator.json
 *.log
 *~$*

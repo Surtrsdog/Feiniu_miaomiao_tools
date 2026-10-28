@@ -418,12 +418,83 @@ def _fallback_multiplier(bb: Dict[str, float],
     return None
 
 
+def _detect_mixed(bb: Dict[str, float], desc: str):
+    """识别「一次攻击同时打出物理 + 法术」的混伤技能。
+
+    官方 blackboard 的键名没有规范，实测混伤至少有六种写法（都出现过）：
+
+      * ``attack@s2.magic_atk_scale``  号角「暴风号令」（配 attack@s2.atk_scale）
+      * ``atk_scale_magic``            早露「龙之箭」（配 atk_scale）
+      * ``attack@extra_magic_atk_scale`` 松果「超高输出属性解放斩」
+      * ``attack@...extra_dmg[magic].atk_scale`` 耀骑士「先贤化身」
+      * ``magic_atk_scale``            重岳「强磁防卫」（停止攻击，纯法术）
+      * ``attack@magic_atk_scale``     澄闪「终幕·浩劫」（浮游单元每秒法伤）
+
+    统一用「键里同时含 magic 与 atk_scale」来定位魔法分量；物理分量
+    按是否带攻击力增益区分：有 ``atk`` 增益键时物理就是普攻（或有
+    ``*physic_atk_scale`` 的额外物理爆发），没有增益时物理就是那个
+    非 magic 的 atk_scale 主倍率。
+
+    返回 ``(攻击增益, 物理倍率, 法术倍率, 是否停止攻击)``；两者倍率都
+    **相对技能期间的攻击力**（含攻击增益）。非混伤返回 None。
+
+    注意：仇白「承影」的 ``sword_begin_atk_scale``（开局法伤）与
+    ``sword_end_atk_scale``（结束物伤）是**两次一次性爆发**，不是每次
+    攻击的混伤，键名里也没有 magic 字样，这里不会误判——它继续按物理
+    普攻（+攻击增益）计算，属于可接受的保守近似。
+    """
+    # 1) 魔法分量：键里同时含 magic 与 atk_scale，且值 > 0。
+    #    nymph_3 有 attack@magic_atk_scale=0.0（条件元素/法术，不可靠分离），
+    #    值为 0 会被跳过，不会误判成混伤。
+    mval = 0.0
+    for k in _keys_with(bb, "magic", "atk_scale"):
+        v = bb.get(k)
+        if v and v > 0:
+            mval = float(v)
+            break
+    if not mval:
+        return None
+
+    stops = "停止攻击" in (desc or "")
+
+    # 2) 攻击增益（相对面板攻击力）。atk 键是加算百分比（+110% -> 2.1）。
+    atk_gain = 1.0
+    if "atk" in bb and bb["atk"]:
+        atk_gain = 1.0 + float(bb["atk"])
+
+    if stops:
+        # 停止普攻：物理分量为 0，只有那个周期性法术范围伤害
+        return atk_gain, 0.0, mval, True
+
+    # 3) 物理分量
+    phys = 1.0
+    # 显式的「额外物理伤害」键（松果解放斩：350% 物理爆发）
+    for k in _keys_with(bb, "physic", "atk_scale"):
+        v = bb.get(k)
+        if v and v > 0:
+            phys = float(v)
+            break
+    else:
+        # 没有攻击增益时，主攻击本身就是那个 atk_scale（号角/早露），
+        # 取第一个非 magic 的 atk_scale 键作为物理主倍率。
+        if "atk" not in bb:
+            for k in _keys_with(bb, "atk_scale"):
+                if "magic" in k.lower():
+                    continue
+                v = bb.get(k)
+                if v and v > 0:
+                    phys = float(v)
+                    break
+    return atk_gain, phys, mval, False
+
+
 def extract(skill_entry: dict, level_index: int = -1) -> dict:
     """从一个技能的某个等级取出可量化参数。
 
     返回 dict，键与 skills.SkillLevel 对齐：
       atk_multiplier / flat_atk / attack_speed / interval_delta /
       hit_count / duration / cost / initial / extra
+      混伤技能额外带 magic_scale / stops_attack（物理分量折进 dmg_scale）
     """
     levels = skill_entry.get("levels") or []
     if not levels:
@@ -444,8 +515,16 @@ def extract(skill_entry: dict, level_index: int = -1) -> dict:
     mul = 1.0
     dmg_scale = 1.0
     seg: List[float] = []          # 多段递减倍率的各段倍率
-    if "atk" in bb:
-        mul = 1.0 + bb["atk"]
+    # 面板攻击力增益有两套键：``atk``（「攻击力+{atk:0%}」）与 ``attack@atk``
+    # （描述同样写「攻击力+{attack@atk:0%}」，只是键名不同）。两者同表且
+    # 数值相等时是同一件事（松果 S2 都是 1.0），只取一个；当 ``atk`` 缺失
+    # 时（塔露拉 S2 只有 attack@atk=1.2）``attack@atk`` 才是那个增益，
+    # 不能漏掉——之前被误当成 flat 加到公式里，实际应是倍率。
+    _atk_gain = bb.get("atk", 0.0) or 0.0
+    if not _atk_gain:
+        _atk_gain = bb.get("attack@atk", 0.0) or 0.0
+    if _atk_gain:
+        mul = 1.0 + _atk_gain
         # atk 和 atk_scale 同时出现时多数是两件事都要算：
         #   抑扬格 atk=0.6 + atk_scale=2.25 -> 1.6 x 2.25（面板加成 + 单次倍率）
         #   阵雨连绵 atk=0.55 + atk_scale=2.4
@@ -544,9 +623,43 @@ def extract(skill_entry: dict, level_index: int = -1) -> dict:
     dur = _last(["duration", "skill_duration"], bb, 0.0)
     cost = _last(["cost", "sp_cost"], bb, 0.0)
     init = _last(["sp", "init_sp"], bb, 0.0)
-    flat = _last(["attack@atk", "atk_flat"], bb, 0.0)
+    # 真正的「附加攻击力」（绝对数值，公式里的 flat）官方没有统一的键，
+    # 目前不存在 atk_flat 这种键，也没有可靠的固定数值加成来源。旧的
+    # ``attack@atk`` 是**攻击力百分比增益**（描述写「攻击力+{attack@atk:0%}」），
+    # 不是 flat，被当成 flat 会重复叠加一次攻击力（例：塔露拉 S2 会被算成
+    # x2.2 再加 120% 面板攻击）。所以 flat 这里固定为 0。
+    flat = 0.0
 
     extra: List[str] = []
+
+    # ---- 混伤：一次攻击同时打出物理 + 法术
+    # 关键在「分类型计算」——物理分量吃防御、法术分量吃法抗，绝不能
+    # 再当成单一类型。物理分量（含攻击增益）折进 atk_multiplier /
+    # dmg_scale，法术分量单独存成 magic_scale（相对技能期攻击力）。
+    magic_scale = 0.0
+    stops_attack = False
+    mixed = _detect_mixed(bb, _desc)
+    if mixed is not None:
+        _gain, _phys, _mval, _stops = mixed
+        # 停止普攻（重岳「强磁防卫」）：物理为 0，只有周期性法术范围伤。
+        # 这类技能的 atk 增益是防御向的，攻击增益也不该再乘到物理上。
+        stops_attack = _stops
+        magic_scale = _mval
+        if _stops:
+            mul = 1.0
+            dmg_scale = 1.0
+        else:
+            # 物理分量折进主倍率。_gain 是「相对面板」的攻击增益，
+            # _phys 是「相对技能期攻击力」的物理倍率（缺省就是普攻 1.0）。
+            mul = _gain
+            dmg_scale = _phys
+            # 有显式物理爆发倍率（松果 350%）时，倍率已经落在 dmg_scale，
+            # 不再叠加默认的普攻 1.0——两者是同一件事，只取爆发值。
+            if _phys != 1.0:
+                dmg_scale = _phys
+        extra.append("混伤：法术分量 x%.2f%s" % (
+            _mval, "（停止普攻，纯法术周期伤）" if _stops else ""))
+
     if mul != 1.0:
         extra.append("攻击力 x%.2f" % mul)
     if hits > 1:
@@ -567,6 +680,8 @@ def extract(skill_entry: dict, level_index: int = -1) -> dict:
         "duration": dur,
         "cost": cost,
         "initial": init,
+        "magic_scale": magic_scale,
+        "stops_attack": stops_attack,
         "extra": extra,
     }
 

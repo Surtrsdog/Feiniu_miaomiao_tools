@@ -15,15 +15,23 @@ from .widgets import (ACCENT, ACCENT_DIM, BG, BG_DEEP, BG_PANEL, BG_SUNKEN,
                       PAD_M, PAD_S, PAD_XS, apply_dark_style, harmonize)
 
 #: (键, 标题, 说明, 强调色)
+#:
+#: 强调色统一用 ACCENT（和「伤害计算」一致的蓝）。以前每张卡片一个色相
+#: （绿/橙/紫/青），首页看起来像五个不相关的入口；统一之后是「同一套
+#: 功能的一组入口」，靠位置和标题区分，不靠颜色区分。
 FEATURES = [
     ("damage", "伤害计算",
      "按干员面板与技能倍率，算物理 / 法术 / 元素 / 真实伤害，\n"
      "并给出随敌方防御变化的 DPS 曲线。",
-     "#4ea1f7"),
+     ACCENT),
     ("path", "寻路分析",
      "按关卡地图还原敌人行进路线与出怪时间轴，\n"
      "查看每秒谁从哪个坐标出发。",
-     "#2ecc71"),
+     ACCENT),
+    ("sandbox", "沙盘推演",
+     "在寻路图上摆干员、放箱子、踢敌人、加减速，\n"
+     "实时看路线改道与到达时间的变化。",
+     ACCENT),
 ]
 
 #: 入口卡片下方的两个数据索引栏
@@ -31,14 +39,14 @@ FEATURES = [
 EXTRA = [
     ("op_index", "干员数据",
      "全部 463 名干员的职业、分支、面板与技能倍率查询。",
-     "#e0a03c"),
+     ACCENT),
     ("monster_index", "怪物数据图鉴",
      "按名字检索敌人，查看特性、技能与各类抗性。",
-     "#c471ed"),
+     ACCENT),
     ("field_index", "数据字段图鉴",
      "解包数据的 145 个字段 / 200 个 blackboard token 逐条解释，\n"
      "按名字搜索，看清 attributes、prefabKey 这些键到底存什么。",
-     "#3fb6a8"),
+     ACCENT),
 ]
 
 

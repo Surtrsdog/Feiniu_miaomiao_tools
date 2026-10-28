@@ -41,6 +41,10 @@ EXCEL_STAGE = "excel/stage_table.json"
 EXCEL_ZONE = "excel/zone_table.json"
 EXCEL_HANDBOOK = "excel/enemy_handbook_table.json"
 EXCEL_CHAR = "excel/character_table.json"
+#: 集成战略（肉鸽）。stage_table 里一条肉鸽关卡都没有——官方把肉鸽
+#: 关卡索引单独放这张表里（details.rogue_N.stages[*].levelId）。
+#: 18 MB，比 stage_table 略小，但同样要给长超时。
+EXCEL_ROGUELIKE_TOPIC = "excel/roguelike_topic_table.json"
 ENEMY_DB = "levels/enemydata/enemy_database.json"
 
 _ENEMY_DB_ALT = [
@@ -101,6 +105,18 @@ def fetch_enemy_database(tries: int = 3) -> dict:
         except FetchError as e:
             last = e
     raise last or FetchError("敌人库下载失败")
+
+
+def fetch_roguelike_topic_table(tries: int = 3) -> dict:
+    """集成战略主题表（18MB）。
+
+    这是**唯一**能拿到肉鸽关卡索引的地方：stage_table.json 里
+    3643 条 stage 一条肉鸽都没有（stageType 无 ROGUELIKE），
+    zone_table 里那 6 个 rogue_N 是空壳（挂关卡数 0）。
+    真正的关卡清单在 ``details.rogue_N.stages[*]``，含 ``levelId``
+    与 ``levelReplaceIds``（换皮图）。
+    """
+    return fetch_json(EXCEL_ROGUELIKE_TOPIC, timeout=480.0, tries=tries)
 
 
 def list_level_paths(tries: int = 3) -> List[str]:

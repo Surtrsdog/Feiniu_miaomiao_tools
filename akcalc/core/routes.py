@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import constants as C
 from . import pathfinding as PF
-from .models import GameMap, Route
+from .models import GameMap, Route, WAIT_SENTINEL_CLAMP
 
 Coord = Tuple[int, int]
 
@@ -41,6 +41,8 @@ class Node:
     vanish: bool = False         # 敌人到达该节点后离场
     #: 该节点相对格中心的偏移 ``(行偏移, 列偏移)``，来自 reachOffset
     off: Tuple[float, float] = (0.0, 0.0)
+    #: 该节点的停驻里含「永久站桩」哨兵（见 models.WAIT_SENTINEL_MIN）
+    sentinel: bool = False
 
 
 @dataclass
@@ -154,6 +156,38 @@ class RouteAnalysis:
                 t -= s.wait_after
         return None
 
+    def wait_span_at(self, elapsed: float) -> Optional[float]:
+        """``elapsed`` 时刻若正在罚站，还剩多少秒。
+
+        沙盘悬停敌人要显示「是否在罚站 / 还剩多久」，而这个量没法从
+        ``pose_at`` 反推——那里只给出位置。所以单独走一遍分段账：
+        与 ``pose_at`` 完全相同的推进顺序，只是在吃掉时间的过程中
+        判断「当前是否落在某个停驻段内」。
+
+        不在罚站时返回 ``None``（而不是 0），好让调用方区分「没停」
+        和「刚好停完」。
+        """
+        if elapsed < 0:
+            return None
+        t = float(elapsed)
+        segs = [s for s in self.segments if s.path]
+
+        if self.pre_wait > 0:
+            if t < self.pre_wait:
+                return self.pre_wait - t
+            t -= self.pre_wait
+
+        for s in segs:
+            if s.time > 0:
+                if t < s.time:
+                    return None
+                t -= s.time
+            if s.wait_after > 0:
+                if t < s.wait_after:
+                    return s.wait_after - t
+                t -= s.wait_after
+        return None
+
     def _seg_off(self, idx: int) -> Tuple[float, float]:
         """第 idx 个节点的 ``(行偏移, 列偏移)``，越界时返回零偏移。"""
         if 0 <= idx < len(self.seg_offsets):
@@ -239,9 +273,18 @@ def analyze_route(game_map: GameMap,
             else:
                 nodes.append(Node((r, c), 0.0, off=off))
         else:
-            # WAIT_* / DISAPPEAR：position 是占位值，只贡献停驻时间
-            if nodes:
+            # WAIT_* / DISAPPEAR：position 是占位值，只贡献停驻时间。
+            #
+            # 只有 WAIT_FOR_SECONDS 的 time 是「秒数」。WAIT_CURRENT_FRAGMENT_TIME
+            # / WAIT_CURRENT_WAVE_TIME 的 time 是**波次时间轴刻度**（「停到第
+            # N 秒为止」），不是「停 N 秒」。混用会把罚站算成几十倍——
+            # 实测 act18d3_ex08 R1 算成 600s（该关片段最长跨度 60s）、
+            # main_05-07 R1 算成 220s（实际 29.5s），全库 458 条路线受影响。
+            # 精确求解要按波次推进推时刻表，这里先不计入，宁可少算不错算。
+            if nodes and cp.is_duration_wait:
                 nodes[-1].wait += cp.wait_time
+                if cp.wait_sentinel:
+                    nodes[-1].sentinel = True
             if kind == "DISAPPEAR":
                 nodes[-1].vanish = True
     if not (nodes and nodes[-1].vanish):
@@ -259,11 +302,13 @@ def analyze_route(game_map: GameMap,
             prev.wait += n.wait
             prev.teleport = prev.teleport or n.teleport
             prev.vanish = prev.vanish or n.vanish
+            prev.sentinel = prev.sentinel or n.sentinel
             # 同格时保留后出现的那份偏移（更接近「最终落点」）
             if n.off != (0.0, 0.0):
                 prev.off = n.off
             continue
-        cleaned.append(Node(n.pos, n.wait, n.teleport, n.vanish, n.off))
+        cleaned.append(Node(n.pos, n.wait, n.teleport, n.vanish, n.off,
+                            n.sentinel))
 
     # 偏移表：segments[i] 是 cleaned[i] -> cleaned[i+1]，所以每段的
     # 起终点偏移就是 cleaned[i].off / cleaned[i+1].off。
@@ -319,6 +364,25 @@ def analyze_route(game_map: GameMap,
     # （到达停驻），于是这 270 秒被彻底丢掉，动画里敌人刚出场就走到终点。
     if cleaned:
         ra.pre_wait = max(0.0, cleaned[0].wait)
+
+    # 「永久站桩」哨兵合计封顶。
+    #
+    # 单个 999/9999 秒的停驻已在解析时钳到 600 秒（见 models.clamp_wait_time），
+    # 但一条路线里可能有**多个**哨兵（act26side_01 route0 就是两段 999 秒中间
+    # 夹着巡逻），逐项钳完再相加仍会得到 1200 秒。这里按路线做一次合计封顶：
+    # 只要这条线上出现过哨兵，就把「停驻总量」压到上限，超出的部分丢掉。
+    # 语义上也更对——「站到本关结束」无论出现几次，敌人都是同一时刻才动。
+    if any(n.sentinel for n in cleaned):
+        total_wait = ra.pre_wait + ra.wait_time
+        if total_wait > WAIT_SENTINEL_CLAMP:
+            # 先扣途中停驻，扣不够再扣出发前罚站（保留出发前那段更贴近
+            # 「这只怪提前站在这儿等着」的观感）。
+            over = total_wait - WAIT_SENTINEL_CLAMP
+            cut = min(over, ra.wait_time)
+            ra.wait_time -= cut
+            over -= cut
+            if over > 0:
+                ra.pre_wait = max(0.0, ra.pre_wait - over)
 
     ra.total_time = ra.move_time + ra.wait_time + ra.pre_wait
     extra = []

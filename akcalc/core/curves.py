@@ -387,6 +387,184 @@ def build_chart(kind: str,
     return chart
 
 
+# ------------------------------------------------------------------ 混伤图表
+
+#: 混伤图表里各伤害分量的配色（与单类型图保持一致）。
+MIXED_TYPE_COLORS = {
+    C.DMG_PHYSICAL: "#4ea1f7",
+    C.DMG_MAGICAL: "#9b59b6",
+    C.DMG_ELEMENTAL: "#16a085",
+    C.DMG_TRUE: "#e67e22",
+    C.DMG_HEAL: "#2ecc71",
+}
+#: 混伤总量线的颜色（醒目，一眼看出「加总后」的曲线）。
+MIXED_TOTAL_COLOR = "#e74c3c"
+
+
+def _multi_selectors(kind: str, interval: float):
+    """按曲线种类返回混伤的 (总量选择器, 分类型选择器)。
+
+    分类型选择器返回 ``{伤害类型: 数值}``；总量选择器返回单个数值。
+    与单类型曲线对齐：dph 用 DPH（final x hit），dps 用 DPS，
+    其余（dmg_* / dmg_pen）用单次伤害（final）。
+    """
+    if kind == "dph":
+        return (lambda r: r.total_damage), (lambda r: r.per_type())
+    if kind in ("dps", "dps_res"):
+        def _total(r):
+            return r.total_damage / interval if interval > 0 else 0.0
+        def _per(r):
+            return {t: v / interval if interval > 0 else 0.0
+                    for t, v in r.per_type().items()}
+        return _total, _per
+    return (lambda r: r.final_damage), (lambda r: r.per_type_hit())
+
+
+def _sweep_multi(m_inp: DMG.MultiTypeInput,
+                 values: Sequence[float],
+                 setter: Callable[[DMG.MultiTypeInput, float], None],
+                 sel_total, sel_per):
+    """对混伤输入扫一遍自变量，同时产出总量曲线与分类型曲线。"""
+    total_pts: List[Tuple[float, float]] = []
+    per_pts: Dict[str, List[Tuple[float, float]]] = {}
+    for v in values:
+        mi = copy.deepcopy(m_inp)
+        setter(mi, v)
+        try:
+            r = DMG.compute_multi(mi)
+        except ValueError:
+            continue
+        total_pts.append((v, sel_total(r)))
+        for t, val in sel_per(r).items():
+            per_pts.setdefault(t, []).append((v, val))
+    return total_pts, per_pts
+
+
+def build_mixed_chart(kind: str,
+                      m_inp: DMG.MultiTypeInput,
+                      interval: float,
+                      *,
+                      x_max: float = 0.0,
+                      points: int = 121,
+                      break_line: float = 0.0) -> CurveChart:
+    """混伤曲线：按伤害类型分别计算后再加总，并画出每一条分量线。
+
+    与 :func:`build_chart` 的曲线种类一一对应。横轴只扫一个自变量：
+    防御轴只让物理分量变动（法抗分量保持目标法抗不变），法抗轴只让
+    法术分量变动（物理分量保持目标防御不变）——这正是「混伤要分类型
+    计算」在图表上的落点。
+    """
+    chart = CurveChart()
+
+    if kind in ("dmg_def", "dph", "dps"):
+        hi = x_max or max(3000.0, m_inp.attack * 3.0)
+        xs = _steps(0.0, hi, points)
+        setter = lambda mi, v: setattr(mi, "target_defense", v)
+        chart.x_label, chart.x_unit = "防御力", "DEF"
+        title = {"dmg_def": "伤害", "dph": "DPH", "dps": "DPS"}[kind]
+        chart.title = "%s - 防御（混伤，分类型）" % title
+    elif kind in ("dmg_res", "dps_res"):
+        hi = x_max or 100.0
+        xs = _steps(0.0, hi, points)
+        setter = lambda mi, v: setattr(mi, "target_res", v)
+        chart.x_label, chart.x_unit = "法术抗性", "RES"
+        title = "DPS" if kind == "dps_res" else "伤害"
+        chart.title = "%s - 法抗（混伤，分类型）" % title
+    elif kind == "dmg_elem":
+        hi = x_max or 100.0
+        xs = _steps(0.0, hi, points)
+        setter = lambda mi, v: setattr(mi, "target_eres", v)
+        chart.x_label, chart.x_unit = "元素抗性", "元素"
+        chart.title = "伤害 - 元素抗性（混伤，分类型）"
+    elif kind == "dmg_atk":
+        hi = x_max or max(500.0, m_inp.attack * 3.0)
+        xs = _steps(0.0, hi, points)
+        setter = lambda mi, v: setattr(mi, "attack", v)
+        chart.x_label, chart.x_unit = "面板攻击力", "ATK"
+        chart.title = "伤害 - 攻击力（混伤，分类型）"
+    elif kind == "dmg_mult":
+        hi = x_max or 5.0
+        xs = _steps(0.0, hi, points)
+
+        def setter(mi: DMG.MultiTypeInput, v: float) -> None:
+            # 把首个分量的倍率拉到 v，其余分量按同一比例缩放，保持比例关系
+            if not mi.components:
+                return
+            base = mi.components[0].attack_multiplier or 1.0
+            ratio = v / base
+            for c in mi.components:
+                c.attack_multiplier = c.attack_multiplier * ratio
+
+        chart.x_label, chart.x_unit = "攻击力倍率", "x"
+        chart.title = "伤害 - 攻击力倍率（混伤，分类型）"
+    elif kind == "dmg_pen":
+        xs = _steps(0.0, 100.0, points)
+
+        def setter(mi: DMG.MultiTypeInput, v: float) -> None:
+            p = v / 100.0
+            for c in mi.components:
+                if c.damage_type == C.DMG_PHYSICAL:
+                    c.def_pen_percent = p
+                elif c.damage_type == C.DMG_MAGICAL:
+                    c.res_pen_percent = p
+
+        chart.x_label, chart.x_unit = "百分比穿透", "%"
+        chart.title = "伤害 - 百分比穿透（混伤，分类型）"
+    elif kind == "dps_speed":
+        xs = _steps(C.ATTACK_SPEED_MIN, C.ATTACK_SPEED_MAX, points)
+        base = DMG.compute_multi(m_inp)
+        total_pts = [(s, base.total_damage /
+                      DMG.effective_attack_interval(interval, s)
+                      if DMG.effective_attack_interval(interval, s) > 0 else 0.0)
+                     for s in xs]
+        per_pts = {t: [(s, val /
+                        DMG.effective_attack_interval(interval, s)
+                        if DMG.effective_attack_interval(interval, s) > 0 else 0.0)
+                       for s in xs] for t, val in base.per_type().items()}
+        chart.x_label, chart.x_unit = "攻击速度", "攻速"
+        chart.title = "DPS - 攻速（混伤，分类型）"
+        chart.y_label, chart.y_unit = "伤害 / 秒", "DPS"
+        chart.series.append(CurveSeries(
+            name="总量", points=total_pts, color=MIXED_TOTAL_COLOR, unit="DPS"))
+        for t, pts in per_pts.items():
+            chart.series.append(CurveSeries(
+                name=C.DMG_TYPE_LABELS.get(t, t), points=pts,
+                color=MIXED_TYPE_COLORS.get(t, "#7f8c99"), unit="DPS"))
+        chart.desc = "混伤按类型分别结算后加总；实际间隔 T = T0 / (clamp(攻速,10,600)/100)"
+        return chart
+    else:
+        raise ValueError("未知曲线类型: %s" % kind)
+
+    # 其余种类：y 轴含义由 kind 决定
+    if kind == "dph":
+        chart.y_label, chart.y_unit = "每次攻击总伤害", "DPH"
+    elif kind in ("dps", "dps_res"):
+        chart.y_label, chart.y_unit = "伤害 / 秒", "DPS"
+    else:
+        chart.y_label, chart.y_unit = "单次伤害", "单次"
+
+    _u = {"dmg_def": "单次", "dmg_res": "单次", "dmg_elem": "单次",
+          "dmg_atk": "单次", "dmg_mult": "单次", "dmg_pen": "单次",
+          "dph": "DPH", "dps": "DPS", "dps_res": "DPS"}[kind]
+
+    sel_total, sel_per = _multi_selectors(kind, interval)
+    total_pts, per_pts = _sweep_multi(m_inp, xs, setter, sel_total, sel_per)
+
+    chart.series.append(CurveSeries(
+        name="总量", points=total_pts, color=MIXED_TOTAL_COLOR, unit=_u))
+    for t, pts in per_pts.items():
+        chart.series.append(CurveSeries(
+            name=C.DMG_TYPE_LABELS.get(t, t), points=pts,
+            color=MIXED_TYPE_COLORS.get(t, "#7f8c99"), unit=_u))
+
+    if break_line > 0:
+        chart.marker_x = break_line
+        chart.marker_label = "破甲线"
+    chart.desc = ("混伤：物理分量吃防御、法术分量吃法抗，各自结算后加总。"
+                  "曲线同时画出每个伤害类型的分量线。")
+    return chart
+
+
 # ------------------------------------------------------------------ 多干员对比
 
 #: 最多同时对比几位（与 UI 的槽位数一致）
@@ -451,3 +629,126 @@ def compare_chart(kind: str,
 
     chart.desc = "%d 位干员对比：%s" % (len(entries), base.desc or base.title)
     return chart
+
+
+# ------------------------------------------------------------------ 召唤物曲线
+
+#: 召唤物曲线统一用这个颜色（与本体/各伤害类型区分开）
+SUMMON_COLOR = "#f39c12"
+SUMMON_TOTAL_COLOR = "#e67e22"
+
+#: 各曲线种类对应的横轴。召唤物曲线要靠它知道自己该扫哪个抗性字段。
+_KIND_AXIS = {
+    "dmg_def": "def", "dph": "def", "dps": "def",
+    "dmg_res": "res", "dps_res": "res",
+    "dmg_elem": "eres",
+    "dmg_atk": "atk",
+    "dmg_mult": "mult",
+    "dmg_pen": "pen",
+    "dps_speed": "speed",
+}
+
+
+def summon_points(kind: str,
+                  inp: DMG.SummonInput,
+                  values: Sequence[float],
+                  *,
+                  target_def: float = 0.0,
+                  target_res: float = 0.0,
+                  target_eres: float = 0.0) -> List[Tuple[float, float]]:
+    """按曲线种类扫一遍召唤物，产出 ``[(横坐标, 纵坐标), ...]``。
+
+    **只认自己的轴**：防守轴才改防御、法抗轴才改法抗。以前用「载体
+    MultiTypeInput 由本体 setter 填写」的做法会把本体那条的横轴语义
+    带进来（扫防御时原代码把 damage_type 强制改成物理），召唤物就会
+    在法抗轴上跟着物理走，画出来的线是错的。
+
+    与防御/法抗无关的轴（攻击力、倍率、攻速、穿透）按常规处理：
+    攻击力轴改召唤物攻击力；倍率轴改倍率；攻速轴改它自己的间隔；
+    穿透轴改召唤物的穿透。
+    """
+    axis = _KIND_AXIS.get(kind, "def")
+    out: List[Tuple[float, float]] = []
+    for v in values:
+        s = copy.copy(inp)
+        d, r, e = target_def, target_res, target_eres
+        iv = s.interval
+
+        if axis == "def":
+            d = v
+        elif axis == "res":
+            r = v
+        elif axis == "eres":
+            e = v
+        elif axis == "atk":
+            s.attack = v
+        elif axis == "mult":
+            if inp.attack > 0:
+                s.attack_multiplier = inp.attack_multiplier * (v / inp.attack)
+        elif axis == "pen":
+            p = max(0.0, min(100.0, v)) / 100.0
+            if s.damage_type == C.DMG_PHYSICAL:
+                s.def_pen_percent = p
+            elif s.damage_type == C.DMG_MAGICAL:
+                s.res_pen_percent = p
+        elif axis == "speed":
+            iv = DMG.effective_attack_interval(inp.interval, v)
+
+        try:
+            res = DMG.compute_summon(s, d, r, e)
+        except ValueError:
+            continue
+
+        if kind == "dph":
+            y = res.total_damage
+        elif kind in ("dps", "dps_res"):
+            y = res.total_damage / iv if iv > 0 else 0.0
+        else:
+            y = res.final_damage
+        out.append((v, y))
+    return out
+
+
+def summon_series(kind: str,
+                  inp: DMG.SummonInput,
+                  values: Sequence[float],
+                  *,
+                  target_def: float = 0.0,
+                  target_res: float = 0.0,
+                  target_eres: float = 0.0) -> CurveSeries:
+    """召唤物单独一条曲线。"""
+    unit = {"dph": "DPH", "dps": "DPS", "dps_res": "DPS"}.get(kind, "单次")
+    return CurveSeries(
+        name="召唤物·%s" % inp.name,
+        points=summon_points(kind, inp, values, target_def=target_def,
+                             target_res=target_res, target_eres=target_eres),
+        color=SUMMON_COLOR, unit=unit,
+        note="召唤物独立攻击流（攻击 %.0f / 间隔 %.2fs）"
+             % (inp.attack, inp.interval))
+
+
+def summon_combo_series(kind: str,
+                        inp: DMG.SummonInput,
+                        values: Sequence[float],
+                        base_points: Sequence[Tuple[float, float]],
+                        *,
+                        target_def: float = 0.0,
+                        target_res: float = 0.0,
+                        target_eres: float = 0.0) -> CurveSeries:
+    """本体 + 召唤物 的合计曲线（逐点相加）。"""
+    unit = {"dph": "DPH", "dps": "DPS", "dps_res": "DPS"}.get(kind, "单次")
+    by_x = {round(x, 6): y for x, y in summon_points(
+        kind, inp, values, target_def=target_def, target_res=target_res,
+        target_eres=target_eres)}
+    pts = [(x, y + by_x.get(round(x, 6), 0.0)) for x, y in base_points]
+    return CurveSeries(name="本体 + 召唤物", points=pts,
+                       color=SUMMON_TOTAL_COLOR, unit=unit,
+                       note="两条独立攻击流之和")
+
+
+def summon_x_values(kind: str, base: CurveChart) -> List[float]:
+    """从已画好的本体图里取横坐标，供召唤物曲线对齐。"""
+    for s in base.series:
+        if s.points:
+            return [x for x, _ in s.points]
+    return []

@@ -15,6 +15,7 @@ from ..core.catalog import StageCatalog
 from ..core.enemies import EnemyLibrary
 from ..core.maps import LevelCache
 from ..core.operator_modules import ModuleLibrary
+from ..core.summons import SummonLibrary
 from ..core.models import EnemyStats, Operator
 from ..core import settings as SET
 from ..core import single_instance as SI
@@ -59,6 +60,9 @@ class App(tk.Tk):
         self.module_lib = ModuleLibrary(self.paths)
         self.module_lib.load_cached()
         self.module_lib.ensure_raw()
+        # 召唤物数值库（召唤师/战术家/工匠的输出主体）
+        self.summon_lib = SummonLibrary(self.paths)
+        self.summon_lib.load_cached()
         self.stage_catalog = self._load_stage_catalog()
         self.enemy_names = self._load_enemy_names()
 
@@ -230,6 +234,7 @@ class App(tk.Tk):
         # 延迟到首次进入对应功能页才建，启动只留轻量的主界面。
         self._damage_panel = None
         self._path_panel = None
+        self._sandbox_panel = None
 
         # 数据索引两栏：延迟构建，首次进入才建，避免启动时白等。
         self._op_view = None
@@ -286,7 +291,14 @@ class App(tk.Tk):
         zone_tbl = self._read_bundled_json("zone_table.json")
         if not stage_tbl or not zone_tbl:
             return StageCatalog()
+        # 集成战略（肉鸽）的关卡索引不在这两张表里，是单独一张
+        # roguelike_topic_table.json。没有它「集成战略」分类就是空的——
+        # 官方 stage_table 里一条肉鸽关卡都没有。
+        rl_tbl = self._read_bundled_json("roguelike_topic_table.json")
         try:
+            cat = StageCatalog.build(stage_tbl, zone_tbl, roguelike_topic=rl_tbl)
+        except TypeError:
+            # 老签名兜底（理论上不会走到，防止自定义构建出错时整个目录没了）
             cat = StageCatalog.build(stage_tbl, zone_tbl)
         except Exception:
             return StageCatalog()
@@ -355,6 +367,12 @@ class App(tk.Tk):
                 self._path_panel = PathPanel(self._view_wrap, self)
                 self._views["path"] = self._path_panel
             return self._path_panel
+        if key == "sandbox":
+            if self._sandbox_panel is None:
+                from .sandbox_panel import SandboxPanel
+                self._sandbox_panel = SandboxPanel(self._view_wrap, self)
+                self._views["sandbox"] = self._sandbox_panel
+            return self._sandbox_panel
         return self._views.get(key)
 
     def _populate_operator_controls(self) -> None:
@@ -406,6 +424,8 @@ class App(tk.Tk):
             self.status.set("伤害计算：选干员后自动计算")
         elif key == "path":
             self.status.set("寻路分析：选关卡后加载地图与时间轴")
+        elif key == "sandbox":
+            self.status.set("沙盘推演：选关卡后摆干员、放箱子、踢敌人")
         elif key == "op_index":
             self.status.set("干员数据：左侧搜索，右侧看面板与技能")
         elif key == "monster_index":

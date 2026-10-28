@@ -21,8 +21,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-#: 只统计真正生成敌人的动作
+#: 只统计真正生成敌人的动作。
+#:
+#: 关卡 JSON 里 ``actionType`` 有两种写法，必须都认：
+#:
+#: * 字符串枚举名 —— ``"SPAWN"`` / ``"SPAWN_EXTRA"``（新关卡用这个）
+#: * **数值枚举** —— ``0`` 就是 ``SPAWN``，``5`` 是 ``SPAWN_EXTRA``
+#:
+#: 老活动关（``act10d5_*``、``act10mini_*``、``act7mini_*`` 等 117 个）用的是
+#: 数值写法。旧代码 ``str(act.get("actionType")).upper()`` 把它们变成
+#: ``"0"`` / ``"5"``，一个都匹配不上 —— 于是整关「本关出怪」是空的。
 SPAWN_TYPES = ("SPAWN", "SPAWN_EXTRA")
+#: Unpacked ``EnemyActionType`` enum → name
+ACTION_TYPE_ENUM = {
+    0: "SPAWN",
+    1: "ACTIVATE_PREDEFINED",
+    2: "DISPLAY_ENEMY_INFO",
+    3: "ACTIVATE_PREDEFINED_GROUP",
+    4: "PLAY_OPERA",
+    5: "SPAWN_EXTRA",
+    6: "TRIGGER_PREDEFINED",
+    7: "CREATE_NPC",
+}
 
 
 @dataclass
@@ -38,6 +58,33 @@ class SpawnEvent:
     wave_index: int = 0
     fragment_index: int = 0
     action_index: int = 0
+    #: 解包里的 ``isUnharmfulAndAlwaysCountAsKilled``：这类单位没有威胁、
+    #: 也不计入「剩余敌人总数」，是演出/平民/搬运物一类。H8-4 的「平民」、
+    #: 纵怒里多出的「领舞者」都是它 —— 不是解析错了，是**本来就在出怪表里**，
+    #: 只是实机里它们不挡路、不打人，玩家不会当成「怪」。
+    harmless: bool = False
+    #: 解包里的 ``isValid``：``False`` 表示这条出怪**永不触发**（未启用的
+    #: 草稿/废案）。全库 2202 条，散布在 95 个地图里；``act36side_ex03``
+    #: 更是 273 条全部 ``isValid=False``（整关本来不该出怪）。
+    disabled: bool = False
+    #: 解包里的 ``hiddenGroup``：同一关里**互斥**的几组出怪。
+    #:
+    #: 典型是「普通 / 突袭」两种编队写在同一份 waves 里，靠这个字段区分，
+    #: 实机一局只出其中一组。``act1multi_06`` 就是 normal 408 只、raid 446 只、
+    #: 无组 101 只——三组全显示会得到 955 只，而实机任一组最多约 509 只。
+    #: 全库 6961 条、744 个地图有该字段。
+    hidden_group: str = ""
+    #: 解包里的 ``randomSpawnGroupKey``：同 key 的动作是**候选包**，按
+    #: ``weight`` 抽一个出来。全库 10680 条、584 个地图。
+    #: ``act1multi_football`` 单个 ``ball`` 包下就有 810 个备选。
+    random_group: str = ""
+    #: 该出怪在随机候选包里的权重（``randomSpawnGroupKey`` + ``weight``
+    #: 才构成「同组按权重抽一条」的语义）；不属于候选包时为 0。
+    weight: float = 0.0
+    #: 该出怪来自 ``branches[]``（装置/陷阱触发的条件出怪），而不是按时间
+    #: 排的 ``waves[]``。此时 :attr:`time` 只是「最早可能出现的时刻」，
+    #: 真正何时出取决于对应装置是否被激活 —— 见 :attr:`branch`。
+    branch: str = ""
 
     @property
     def label(self) -> str:
@@ -67,6 +114,14 @@ class SpawnGroup:
     stage_time: float = 0.0        # 相对本阶段（波次）开始的时间
     route_index: int = -1
     wave_index: int = 0
+    #: 无害单位（见 :attr:`SpawnEvent.harmless`）
+    harmless: bool = False
+    #: 该批次被门控字段筛掉了（isValid=False，或同组互斥里未选中）
+    disabled: bool = False
+    #: 该批次所在的互斥组名（SpawnEvent.hidden_group），空串表示无组
+    hidden_group: str = ""
+    #: 该批次属于随机候选包（SpawnGroup.random_group）
+    random_group: str = ""
     #: 该批次覆盖的 SpawnEvent 列表（点击隔离路线时用第一条的路线）
     events: List["SpawnEvent"] = field(default_factory=list)
 
@@ -224,18 +279,209 @@ class Timeline:
             seen[e.enemy_id] = None
         return list(seen)
 
-    def groups(self) -> List["SpawnGroup"]:
+    def hostile_events(self) -> List["SpawnEvent"]:
+        """剔除无害单位后的出怪。
+
+        「本关出怪」的默认视图用这个——实机里平民、演出单位、被反复召唤的
+        分身都不算要处理的敌人，混在列表里会让人误以为「这关多了怪」。
+        想看全量（含无害）时直接用 ``self.events`` 或 ``groups(hostile_only=False)``。
+        """
+        return [e for e in self.events if not e.harmless]
+
+    @property
+    def harmless_count(self) -> int:
+        """无害单位的出场次数（用于界面上标注「另有 N 个无害单位」）。"""
+        return sum(1 for e in self.events if e.harmless)
+
+    @property
+    def disabled_count(self) -> int:
+        """``isValid=False``（永不触发）的出怪条数。"""
+        return sum(1 for e in self.events if e.disabled)
+
+    def hidden_groups(self) -> List[str]:
+        """本关所有的互斥组名（``hiddenGroup``），按出场顺序去重。"""
+        seen: Dict[str, None] = {}
+        for e in self.events:
+            if e.hidden_group:
+                seen[e.hidden_group] = None
+        return list(seen)
+
+    def random_groups(self) -> List[str]:
+        """本关所有的随机候选包名（``randomSpawnGroupKey``），按出场顺序去重。"""
+        seen: Dict[str, None] = {}
+        for e in self.events:
+            if e.random_group:
+                seen[e.random_group] = None
+        return list(seen)
+
+    def random_pack_summary(self) -> List[Dict[str, object]]:
+        """每个随机候选包的成员概览，供界面标注「这一包 N 选 1」。
+
+        返回 ``[{group, members, weights, total, expect}, ...]``：
+        ``members`` 是 ``[(enemy_id, enemy_name, count, weight), ...]``，
+        ``total`` 是全列出时的只数，``expect`` 是按权重算的期望只数。
+        """
+        packs: Dict[str, List["SpawnEvent"]] = {}
+        for e in self.events:
+            if e.random_group and not e.disabled:
+                packs.setdefault(e.random_group, []).append(e)
+        out: List[Dict[str, object]] = []
+        for g, evs in packs.items():
+            # 同一 action 会按 count 拆成多条事件，先按 action 聚合
+            per_act: Dict[tuple, List["SpawnEvent"]] = {}
+            for e in evs:
+                per_act.setdefault(
+                    (e.wave_index, e.fragment_index, e.action_index), []).append(e)
+            members = []
+            total = 0
+            wsum = 0.0
+            expect = 0.0
+            for _k, lst in per_act.items():
+                first = lst[0]
+                cnt = int(getattr(first, "count", len(lst)) or len(lst))
+                w = float(getattr(first, "weight", 0.0) or 0.0)
+                members.append((first.enemy_id, first.enemy_name, cnt, w))
+                total += cnt
+                wsum += w
+                expect += cnt * w
+            if wsum > 0:
+                expect /= wsum
+            else:
+                expect = float(max((m[2] for m in members), default=0))
+            out.append({
+                "group": g,
+                "members": members,
+                "weights": [m[3] for m in members],
+                "total": total,
+                "expect": expect,
+            })
+        return out
+
+    def fold_random_packs(self) -> List["SpawnEvent"]:
+        """把随机候选包折叠成「实机一局真会出的那几条」。
+
+        ``randomSpawnGroupKey`` 是**加权候选包**：同一个 key 下的多条
+        spawn 是同一次抽取的备选，实机按 ``weight`` 抽其中**一条**。
+        全库 568 个关卡、1354 个包受影响；最极端的
+        ``act1multi_football`` 一个包挂了 **810** 个备选，全列出来会
+        显示 1393 只，而实机一局只会出约 584 只。
+
+        折叠规则（无随机数，可复现）：每个包**只留一条**代表——
+        ``weight`` 最大的那条；``weight`` 相同则取 ``count`` 最大、
+        再相同取先出现的。这样「本关有什么怪」不会漏掉主角，只数也
+        不会翻倍。想看全部备选时用 ``self.events``。
+
+        注意：包内成员若是同一种敌人但走不同路线（如 ``rogue6_c-2``
+        的角兽 5 个包、每包 2 条同敌人不同路线），折叠后只数减半，
+        这正是实机表现——同一次抽取只会从两条路线里挑一条出兵。
+        """
+        evs = [e for e in self.events if not e.disabled]
+        packs: Dict[str, List["SpawnEvent"]] = {}
+        for e in evs:
+            if e.random_group:
+                packs.setdefault(e.random_group, []).append(e)
+        if not packs:
+            return evs
+        # 每个包里挑一条代表（按 action 聚合后比较）
+        winner: Dict[str, tuple] = {}
+        for g, lst in packs.items():
+            per_act: Dict[tuple, List["SpawnEvent"]] = {}
+            for e in lst:
+                per_act.setdefault(
+                    (e.wave_index, e.fragment_index, e.action_index), []).append(e)
+            best_key = None
+            best_score = None
+            for k, sub in per_act.items():
+                first = sub[0]
+                score = (float(getattr(first, "weight", 0.0) or 0.0),
+                         int(getattr(first, "count", len(sub)) or len(sub)),
+                         -int(k[2]))
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_key = k
+            winner[g] = best_key
+        out: List["SpawnEvent"] = []
+        for e in evs:
+            g = e.random_group
+            if not g:
+                out.append(e)
+                continue
+            if (e.wave_index, e.fragment_index, e.action_index) == winner.get(g):
+                out.append(e)
+        return out
+
+    def effective_events(self, hidden_group: str = "",
+                        fold_random: bool = False) -> List["SpawnEvent"]:
+        """实机**真正会出**的怪：剔除废案 + 互斥组只留一组（可折叠随机包）。
+
+        ``hiddenGroup`` 是同一关里互斥的几组编队（最典型的是「普通 / 突袭」
+        写在同一份 waves 里），实机一局只出其中一组。原先不读这个字段，
+        于是「普通」和「突袭」的怪被一起列出来——``act1multi_06`` 因此
+        显示 955 只，而实机任一组最多约 509 只，看起来就像「多出一倍怪」。
+
+        ``hidden_group`` 选哪一组：
+          * 传具体组名 -> 只留该组 + 无组的那部分
+          * 传空串（默认）-> 自动挑「出战数最多的那一组」，因为那是常规
+            编队（raid/突袭 一般更少或相近，用组数最多的更接近实机常态）
+          * 传 ``"__all__"`` -> 不折叠，全列（调试用）
+
+        ``fold_random``（默认 False）控制 ``randomSpawnGroupKey`` 加权候选包
+        是否折叠成一个代表。关掉时全列备选——对足球那类图会显示 1393 只，
+        等于「多出敌人」；用户在沙盘里核对实机编队时应打开它。
+        详情见 :meth:`Timeline.fold_random_packs`。
+        """
+        evs = [e for e in self.events if not e.disabled]
+        if fold_random:
+            evs = self.fold_random_packs()
+            evs = [e for e in evs if not e.disabled]
+        if hidden_group == "__all__":
+            return evs
+        groups = self.hidden_groups()
+        if not groups:
+            return evs
+        pick = hidden_group
+        if pick not in groups:
+            # 自动挑「只数最多」的那一组（同数时取先出现的）
+            best, best_n = groups[0], -1
+            for g in groups:
+                n = sum(1 for e in evs if e.hidden_group == g)
+                if n > best_n:
+                    best, best_n = g, n
+            pick = best
+        return [e for e in evs
+                if not e.hidden_group or e.hidden_group == pick]
+
+    def groups(self, hostile_only: bool = False,
+               effective: bool = False,
+               hidden_group: str = "",
+               fold_random: bool = False) -> List["SpawnGroup"]:
         """把出怪事件合并成 PRTS 风格的逐条列表（按出场顺序）。
 
         同一批出怪（相同 wave/fragment/action/route，count>1 的多只）
         合并成一条，序号按「全局第几只」连续编号。
+
+        ``hostile_only=True`` 时跳过无害单位（见
+        :meth:`hostile_events`）。
+
+        ``effective=True`` 时只列实机真正会出的怪——剔除 ``isValid=False``
+        的废案、并把互斥的 ``hiddenGroup`` 折叠成一组（见
+        :meth:`effective_events`）。这是「本关出怪」默认该用的模式。
+
+        ``fold_random=True`` 时再把 ``randomSpawnGroupKey`` 加权候选包折叠成
+        一个代表，避免把「N 选 1」显示成 N 只（见
+        :meth:`Timeline.fold_random_packs`）。
         """
         out: List[SpawnGroup] = []
         # 事件已按 (time, route_index) 排好序；这里按批次标识聚合，
         # 并保持出场顺序（Python dict 有序）。
         buckets: Dict[tuple, List[SpawnEvent]] = {}
         order: List[tuple] = []
-        for e in self.events:
+        source = (self.effective_events(hidden_group, fold_random=fold_random)
+                  if effective
+                  else list(self.events))
+        for e in source:
+            if hostile_only and e.harmless:
+                continue
             key = (e.wave_index, e.fragment_index, e.action_index,
                    e.enemy_id, e.route_index)
             if key not in buckets:
@@ -260,6 +506,10 @@ class Timeline:
                 stage_time=head.time - stage_ref,
                 route_index=head.route_index,
                 wave_index=head.wave_index,
+                harmless=head.harmless,
+                disabled=head.disabled,
+                hidden_group=head.hidden_group,
+                random_group=head.random_group,
                 events=evs,
             )
             out.append(g)
@@ -285,12 +535,102 @@ def _i(v, default: int = 0) -> int:
         return default
 
 
+def _num_enum(v):
+    """``actionType`` 归一化成枚举名；认不出就返回 ``""``。"""
+    if isinstance(v, bool):
+        return ""
+    if isinstance(v, int):
+        return ACTION_TYPE_ENUM.get(v, "")
+    s = str(v or "").strip().upper()
+    if not s:
+        return ""
+    if s.isdigit():
+        return ACTION_TYPE_ENUM.get(int(s), "")
+    return s
+
+
+def is_spawn_action(act) -> bool:
+    """这个 action 会不会真的生成敌人。
+
+    ``actionType`` 可能是枚举名（``"SPAWN"``）也可能是枚举序号（``0``），
+    两者都要认——见 :data:`ACTION_TYPE_ENUM` 的说明。
+    """
+    try:
+        return _num_enum(act.get("actionType")) in SPAWN_TYPES
+    except AttributeError:
+        return False
+
+
 def parse_timeline(raw: dict,
                    names: Optional[Dict[str, str]] = None) -> Timeline:
-    """把关卡 JSON 解析成时间轴。"""
+    """把关卡 JSON 解析成时间轴。
+
+    两处出怪来源都要读：
+
+    * ``waves[]`` —— 按时间排的常规波次（绝大多数关卡的主体）
+    * ``branches[]`` —— **装置/陷阱触发的条件出怪**。分支名就是触发它的
+      装置 key（``trap_068_badbox#1``、``summon_cjglon``、``mbx1``、
+      ``bonore_dfello1`` …），全库 744 个地图里有 4904 条 SPAWN。
+
+    为什么必须读 branches
+    --------------------
+    原先只读 ``waves``。好在 744 个带 branches 的图里 738 个 waves 本身也有
+    怪，所以只表现为「少数怪漏了」；但 ``act1dp_01/02/05/ex04/tr01`` 这 5 关
+    **整关的怪全在 branches 里**（waves 只有 PLAY_OPERA 之类的演出动作），
+    于是右侧「本关出怪」永远空白 —— 就是用户报的「部分关卡右侧没有本关出怪」。
+
+    分支出怪的时间怎么算
+    -------------------
+    分支没有绝对时间轴，只有各自 phase 的 ``preDelay``。这里**不**把不同
+    分支的时间相加（那会造出根本不存在的顺序），而是每个分支独立从 0 起算，
+    并把结果标上 ``branch=<分支名>``。界面上这些条目显示为「条件出怪」，
+    时间列的含义是「装置激活后第几秒」，而不是「开局后第几秒」。
+    """
     names = names or {}
     tl = Timeline(names=dict(names))
     waves = raw.get("waves") or []
+
+    def _add_actions(tl_, acts, wi, fi, base, branch=""):
+        """把一段 actions 解析成事件，返回这段动作占用到的时间游标。"""
+        t_cursor = base
+        span_total = 0.0
+        for ai, act in enumerate(acts):
+            if not is_spawn_action(act):
+                continue
+            eid = act.get("key") or ""
+            count = max(1, _i(act.get("count"), 1))
+            interval = _f(act.get("interval"))
+            t0 = t_cursor + _f(act.get("preDelay"))
+            route = act.get("routeIndex")
+            route_index = _i(route, -1) if route is not None else -1
+            harmless = bool(act.get("isUnharmfulAndAlwaysCountAsKilled"))
+            # isValid=False = 这条出怪永不触发（废案/未启用）
+            disabled = act.get("isValid") is False
+            hidden_group = str(act.get("hiddenGroup") or "")
+            random_group = str(act.get("randomSpawnGroupKey") or "")
+            weight = _f(act.get("weight"))
+            for k in range(count):
+                tl_.events.append(SpawnEvent(
+                    time=t0 + k * interval,
+                    enemy_id=eid,
+                    enemy_name=names.get(eid, eid),
+                    count=count,
+                    seq=k,
+                    route_index=route_index,
+                    wave_index=wi,
+                    fragment_index=fi,
+                    action_index=ai,
+                    harmless=harmless,
+                    disabled=disabled,
+                    hidden_group=hidden_group,
+                    random_group=random_group,
+                    weight=weight,
+                    branch=branch,
+                ))
+            # 本批最后一个的生成时间也算进游标
+            span = _f(act.get("preDelay")) + (count - 1) * interval
+            span_total = max(span_total, span)
+        return span_total
 
     for wi, wave in enumerate(waves):
         wave_start = _f(wave.get("preDelay"))
@@ -305,35 +645,23 @@ def parse_timeline(raw: dict,
 
         for fi, frag in enumerate(frags):
             t_cursor += _f(frag.get("preDelay"))
-            span = 0.0
-            for ai, act in enumerate(frag.get("actions") or []):
-                kind = str(act.get("actionType") or "").upper()
-                if kind not in SPAWN_TYPES:
-                    continue
-                eid = act.get("key") or ""
-                count = max(1, _i(act.get("count"), 1))
-                interval = _f(act.get("interval"))
-                t0 = t_cursor + _f(act.get("preDelay"))
-                route = act.get("routeIndex")
-                route_index = _i(route, -1) if route is not None else -1
-                for k in range(count):
-                    tl.events.append(SpawnEvent(
-                        time=t0 + k * interval,
-                        enemy_id=eid,
-                        enemy_name=names.get(eid, eid),
-                        count=count,
-                        seq=k,
-                        route_index=route_index,
-                        wave_index=wi,
-                        fragment_index=fi,
-                        action_index=ai,
-                    ))
-                # 本批最后一个的生成时间也算进游标
-                span = max(span, _f(act.get("preDelay")) + (count - 1) * interval)
+            span = _add_actions(tl, frag.get("actions") or [], wi, fi, t_cursor)
             t_cursor += span
             post = _f(frag.get("postDelay"))
             if post:
                 t_cursor += post
+
+    # ---- branches[]：装置/陷阱触发的条件出怪 ---------------------------
+    # wave_index 用 -1 标记「不属于任何波次」，_fill_isolate_info 等处按
+    # route_index 找路线，不受影响。
+    for bname, bdata in (raw.get("branches") or {}).items():
+        if not isinstance(bdata, dict):
+            continue
+        # 每个分支独立计时，互不相加
+        for fi, phase in enumerate(bdata.get("phases") or []):
+            base = _f(phase.get("preDelay"))
+            _add_actions(tl, phase.get("actions") or [], -1, fi, base,
+                         branch=str(bname))
 
     tl.events.sort(key=lambda e: (e.time, e.route_index))
     # 立刻分配「本关第几只」，这样任何调用方（悬停提示、图表、

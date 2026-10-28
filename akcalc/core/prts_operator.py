@@ -356,17 +356,33 @@ def parse_operator(name: str, text: str) -> Optional[Operator]:
         op.max_elite = max(op.max_elite, elite)
         prev_max = en
 
-    # ---- 天赋（仅作文本展示）
+    # ---- 天赋（展示文本 + 解锁条件，条件用于按精英阶段挑选被动数值）
     tpl = _find_template(text, "天赋列表3") or _find_template(text, "天赋列表")
     if tpl:
         p = _template_params(tpl)
-        for i in (1, 2, 3, 4):
+        for i in (1, 2, 3, 4, 5, 6, 7, 8):
             nm = p.get(f"天赋{i}")
             eff = p.get(f"天赋{i}效果")
             if nm and eff:
-                op.talents.append((nm, _strip_markup(eff)))
+                cond = p.get(f"天赋{i}条件", "")
+                elite = _talent_elite(cond)
+                op.talents.append((nm, _strip_markup(eff), elite))
 
     return op
+
+
+def _talent_elite(cond: str) -> int:
+    """从天赋解锁条件里读出精英阶段（无信息时返回 -1 表示未知）。"""
+    if not cond:
+        return -1
+    c = str(cond)
+    if "精英2" in c:
+        return 2
+    if "精英1" in c:
+        return 1
+    if "精英0" in c:
+        return 0
+    return -1
 
 
 # --------------------------------------------------------------- 缓存层
@@ -453,6 +469,8 @@ def skill_to_dict(sk) -> dict:
                 "attack_speed": lv.attack_speed,
                 "interval_delta": lv.interval_delta,
                 "dmg_scale": lv.dmg_scale,
+                "magic_scale": getattr(lv, "magic_scale", 0.0),
+                "stops_attack": getattr(lv, "stops_attack", False),
                 "hit_count": lv.hit_count,
                 "duration": lv.duration,
                 "cost": lv.cost,
@@ -480,6 +498,8 @@ def dict_to_skill(d: dict):
             attack_speed=ld.get("attack_speed", 0.0),
             interval_delta=ld.get("interval_delta", 0.0),
             dmg_scale=ld.get("dmg_scale", 1.0),
+            magic_scale=ld.get("magic_scale", 0.0),
+            stops_attack=ld.get("stops_attack", False),
             hit_count=ld.get("hit_count", 1),
             duration=ld.get("duration", 0.0),
             cost=ld.get("cost", 0.0),
@@ -548,7 +568,15 @@ def dict_to_op(d: dict) -> Operator:
         trust_bonus=d.get("trust_bonus", {}) or {},
         potential_bonus=d.get("potential_bonus", {}) or {},
     )
-    op.talents = [tuple(t) for t in (d.get("talents") or [])]
+    op.talents = []
+    for t in (d.get("talents") or []):
+        if not t:
+            continue
+        if len(t) >= 3:
+            op.talents.append((t[0], t[1], t[2]))
+        elif len(t) == 2:
+            # 旧缓存只有 (名称, 效果)，解锁精英阶段未知
+            op.talents.append((t[0], t[1], -1))
     op.potential_ranks = list(d.get("potential_ranks") or [])
     op.skills = [dict_to_skill(sd) for sd in (d.get("skills") or [])]
     _reauth_skills(op)

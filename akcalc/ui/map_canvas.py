@@ -22,12 +22,20 @@ from ..core.coords import col_letter, coord_label, parse_label
 from ..core.models import GameMap, Tile
 from ..core.routes import RouteAnalysis, tile_to_pixel
 from .map_render import BG, ROUTE_PALETTE, MapRenderer, _dot_sprite, _font, _rgba
+from .widgets import ACCENT
 
 Coord = Tuple[int, int]
 
 #: 兼容旧导入
 COLOR_TEXT = (238, 242, 247)
 COLOR_TEXT_DIM = (154, 165, 180)
+
+#: 地图悬停提示框的描边/标题色。
+#:
+#: 原来是两档橙色（#ffb4a2 敌人 / #ff9f8a 出怪点），和伤害计算页的
+#: 蓝色体系对不上，也容易和地图里红色的敌人标记混。统一成 ACCENT，
+#: 和伤害计算图表的悬停浮层用同一个强调色。
+_TIP_ACCENT = ACCENT
 
 
 class MapCanvas(tk.Canvas):
@@ -49,8 +57,17 @@ class MapCanvas(tk.Canvas):
         self.on_hover: Optional[Callable[[Optional[Tile]], None]] = None
         self.on_spawn_click: Optional[Callable[[Coord, list], None]] = None
         self.on_enemy_click: Optional[Callable[[dict], None]] = None
+        #: 右键回调 ``(row, col, enemy_dict|None)``。沙盘用它来做
+        #: 「右键干员 -> 撤退/开技能」「右键敌人 -> 减速」「右键空格 -> 部署」。
+        #: 只加回调、不改原有的左键语义，寻路面板不受影响。
+        self.on_cell_right_click: Optional[Callable] = None
+        #: 悬停到具体对象时的回调 ``(kind, payload)``，kind 取
+        #: ``"enemy"`` / ``"tile"`` / ``None``。左键那套 ``on_hover`` 只给
+        #: Tile，拿不到敌人，沙盘需要敌人的实时状态。
+        self.on_object_hover: Optional[Callable] = None
 
         self.bind("<Button-1>", self._click)
+        self.bind("<Button-3>", self._right_click)
         self.bind("<Motion>", self._motion)
         self.bind("<Leave>", self._leave)
         self.bind("<Configure>", self._on_resize)
@@ -137,6 +154,12 @@ class MapCanvas(tk.Canvas):
     highlight_enemy = _proxy("highlight_enemy")
     flip_v = _proxy("flip_v")
     flip_h = _proxy("flip_h")
+    # 机关（传送门 / 火山 / 留声机……）图层开关。没有这个代理时，
+    # 外部 `canvas.show_mech = False` 只会在 Canvas 上挂一个死属性，
+    # 渲染器读到的一直是默认 True，看起来就是「这个开关没反应」。
+    show_mech = _proxy("show_mech")
+    # 点中的传送门及其去向路径：((r,c), (dr,dc), certain, path)
+    portal_link = _proxy("portal_link")
     del _proxy
 
     # ------------------------------------------------------------ 缩放/翻转
@@ -198,6 +221,21 @@ class MapCanvas(tk.Canvas):
         self.markers = list(markers or [])
         self.redraw()
 
+    def set_sandbox(self, data) -> None:
+        """把沙盘棋子推给渲染器。
+
+        ``data`` 是 ``None`` 或一个 dict：
+        ``{"boxes": set[(r,c)], "operators": {(r,c): OperatorPiece},
+        "range": set[(r,c)], "block": set[(r,c)], "slow": [(r,c), ...],
+        "selected_op": (r,c) | None}``。
+
+        ⚠ 只改动态层。渲染器的静态底图 key 里**只**包含
+        「沙盘是否启用」这一个布尔，所以反复放箱子不会重建底图
+        （60 ms），否则拖动石块会明显卡顿。
+        """
+        self._r.sandbox = data
+        self.redraw()
+
     def fit_cell(self) -> None:
         self._r.fit(max(self.winfo_width(), 400), max(self.winfo_height(), 300))
 
@@ -217,7 +255,8 @@ class MapCanvas(tk.Canvas):
         if w < 20 or h < 20:
             return
         self._r.fit(w, h)
-        self._r.invalidate()
+        # 窗口大小变化只改视口裁剪参数，静态主图不用重烘焙
+        # （invalidate 会白重建整张底图，拖窗口会卡）。
         self._paint()
 
     def _paint(self) -> None:
@@ -227,10 +266,7 @@ class MapCanvas(tk.Canvas):
             w, h = 640, 480
         # 每次都重算：换图时尺寸可能变了、也可能没变，但都要按新图的
         # 行列数重新分配格子。fit() 只是几行算术，开销可忽略。
-        old_cell = self._r.cell
         self._r.fit(w, h)
-        if old_cell != self._r.cell:
-            self._r.invalidate()
         im = self._r.render()
         self._photo = ImageTk.PhotoImage(im)
         if self._item is None:
@@ -315,7 +351,7 @@ class MapCanvas(tk.Canvas):
             drow, dcol = self._r.disp_rc(row, col)
             lines.append("坐标 %s" % _fmt_rc(drow, dcol, gm))
             lines.append("点击查看详情")
-            self._tip(x, y, self._r.cell * 0.3, lines, "#ffb4a2")
+            self._tip(x, y, self._r.cell * 0.3, lines, _TIP_ACCENT)
         # 出怪点
         elif self._r.hover_spawn and self._r.hover_spawn in self._r.spawn_points:
             row, col = self._r.hover_spawn
@@ -326,7 +362,7 @@ class MapCanvas(tk.Canvas):
                 lines.append("%s ×%d  %.1fs" % (nm, cnt, t))
             if len(items) > 4:
                 lines.append("还有 %d 种…" % (len(items) - 4))
-            self._tip(x, y, self._r.cell * 0.26, lines, "#ff9f8a")
+            self._tip(x, y, self._r.cell * 0.26, lines, _TIP_ACCENT)
 
     def _tip(self, cx, cy, rad, lines, accent) -> None:
         fs = 9
@@ -382,6 +418,35 @@ class MapCanvas(tk.Canvas):
         if self.on_cell_click:
             self.on_cell_click(r, c)
 
+    def _right_click(self, event) -> None:
+        """右键：先判敌人，再判格子。
+
+        顺序和左键相反是有意的——左键点敌人圆点想「看这只」，右键点
+        敌人想「给这只加状态」。如果先判格子，圆点压在格子上时右键
+        永远只能拿到格子。
+        """
+        enemy = self._enemy_at(event.x, event.y)
+        if enemy is not None:
+            if self.on_cell_right_click:
+                self.on_cell_right_click(-1, -1, enemy)
+            return
+        if not self._r.game_map:
+            return
+        r, c = self._tile_at_event(event)
+        if r < 0:
+            return
+        if self.on_cell_right_click:
+            self.on_cell_right_click(r, c, None)
+
+    def _enemy_at(self, x: float, y: float):
+        """命中的敌人 dict，没有则 None。"""
+        for cx, cy, hit, idx in self._enemy_hit:
+            if (x - cx) ** 2 + (y - cy) ** 2 <= hit ** 2:
+                if 0 <= idx < len(self._r.frame_enemies):
+                    return self._r.frame_enemies[idx]
+                return None
+        return None
+
     def _motion(self, event) -> None:
         if not self._r.game_map:
             return
@@ -408,6 +473,15 @@ class MapCanvas(tk.Canvas):
             if self.on_hover:
                 t = self._r.game_map.tile_at(*new_hover) if new_hover else None
                 self.on_hover(t)
+            if self.on_object_hover:
+                if new_enemy is not None and 0 <= new_enemy < len(
+                        self._r.frame_enemies):
+                    self.on_object_hover("enemy",
+                                         self._r.frame_enemies[new_enemy])
+                elif new_hover:
+                    self.on_object_hover("tile", new_hover)
+                else:
+                    self.on_object_hover(None, None)
 
     def _leave(self, _event) -> None:
         if self._r.hover or self._r.hover_enemy is not None or self._r.hover_spawn:
@@ -417,6 +491,8 @@ class MapCanvas(tk.Canvas):
             self.redraw()
             if self.on_hover:
                 self.on_hover(None)
+            if self.on_object_hover:
+                self.on_object_hover(None, None)
 
     def _dim(self, color: str, t: float) -> str:
         return color

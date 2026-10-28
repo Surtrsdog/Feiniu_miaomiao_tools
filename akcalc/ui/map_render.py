@@ -9,9 +9,9 @@
 
 分层策略
 --------
-* ``_base``：地形 + 路线 + 出怪点，**只在切图/切换显示项时重建**（含 2x
-  超采样缩小，边缘抗锯齿）。
-* 每帧：``_base.copy()`` -> 叠敌人精灵 -> 叠 tooltip -> 转 PhotoImage。
+* ``_master``：地形 + 路线 + 出怪点等静态层，按固定 ``MASTER_CELL`` 烘焙
+  成主图，**只在切图 / 切换显示项 / 翻转时重建**。
+* 每帧：裁剪 + 缩放主图 -> 叠坐标轴（固定字号） -> 叠敌人 / 沙盘 / 悬停。
 
 坐标约定与数据层一致：row 自下往上（第 1 行在最下面），col 自左往右。
 """
@@ -39,44 +39,86 @@ HIGHLAND = (104, 122, 150)
 HIGHLAND_HI = (128, 148, 178)
 DEEPWATER = (26, 62, 84)
 DEEPWATER_HI = (36, 82, 108)
-WALL = (118, 96, 62)
-WALL_HI = (146, 120, 80)
+#: 墙 / 高台墙。原来是土黄 (118,96,62)——地图上唯一的暖色，
+#: 在蓝灰地形里非常扎眼，但它承载的信息量最低（只是「不能站」）。
+#: 改成中性灰：靠明度和地面拉开就行，不需要色相。
+WALL = (104, 100, 98)
+WALL_HI = (128, 124, 122)
 ROAD = (70, 84, 112)
 NONE_FILL = (16, 19, 24)
 HOLE = (8, 10, 14)
 
-SPAWN = (214, 68, 56)
-GOAL = (56, 132, 224)      # 蓝门：敌人走向的终点
+SPAWN = (214, 68, 56)          # 红门：出怪口（游戏内就是红的，保留）
+GOAL = (56, 132, 224)          # 蓝门：敌人走向的终点（游戏内就是蓝的，保留）
 ROUTE = (92, 176, 255)
 TEXT = (238, 242, 247)
 TEXT_DIM = (154, 165, 180)
 COORD = (120, 132, 154)
-COORD_HL = (245, 197, 66)
-GOLD = (245, 197, 66)
-#: 「本关出怪」里被点中的那一行在地图上的高亮色。
-#: 用青色而不是金色——金色已经被悬停占用，两者同时出现要能分清。
-HILITE_RING = (64, 232, 214)
-HILITE_GLOW = (48, 200, 190)
+#: 坐标高亮/悬停。原来是金色 (245,197,66)，和伤害计算页的蓝体系对不上，
+#: 统一成 ACCENT 蓝的亮一档（深底上够亮，又不会像纯白那样刺眼）。
+COORD_HL = (143, 194, 240)
+GOLD = (143, 194, 240)         # 兼容旧名字，实际已是 ACCENT 系
+#: 「本关出怪」里被点中的那一行在地图上的高亮环。
+#: 原来是青色 (64,232,214)，改 ACCENT 亮蓝，和悬停色拉开明度：
+#: 环用 #6bb4ff（更亮更饱和），悬停用 #8fc2f0（偏淡），两圈叠着也分得清。
+HILITE_RING = (107, 180, 255)
+HILITE_GLOW = (61, 138, 214)
 
-#: 机制机关配色。五类各一个主色，色相刻意拉开，远看能分得清：
-#: 传送=青紫（与高亮环的青色接近但要更紫，避免混淆）、危险=橙红、
-#: 增益=翠绿、阻挡=土黄、特殊=洋红。
+#: 沙盘推演棋子配色。
+#: 干员/箱子/减速各自一个语义色，都从 ACCENT 蓝体系里取，只有「箱子」用
+#: 中性灰——因为箱子是「改变地形」的东西，不该抢视觉焦点，用户看的是
+#: 路径怎么变，不是箱子本身。
+PIECE_OPERATOR = (92, 176, 255)    # 干员：ACCENT 主蓝
+PIECE_OPERATOR_DIM = (44, 107, 168)
+PIECE_BOX = (150, 146, 142)        # 箱子：中性灰（不抢眼）
+PIECE_BOX_EDGE = (196, 191, 186)
+PIECE_RANGE = (92, 176, 255)       # 攻击范围填充（会走 alpha）
+PIECE_BLOCK = (231, 76, 60)        # 阻挡警示：红（危险语义）
+PIECE_SLOW = (143, 194, 240)       # 减速标记：ACCENT 淡蓝
+PORTAL_LINK_OK = (126, 217, 87)    # 传送门连线：配对可信（绿）
+PORTAL_LINK_GUESS = (232, 168, 74) # 传送门连线：配对为推断（琥珀）
+
+#: 机制机关配色。只有蓝/红两支，靠明度区分。
+#: 原来五类各一个色相（青紫/橙/绿/土黄/洋红），和路线色、分类色全撞在一起。
 MECH_COLORS = {
-    "portal": (150, 110, 240),
-    "trap": (236, 122, 58),
-    "buff": (72, 196, 130),
-    "wall": (176, 148, 84),
-    "special": (214, 86, 190),
+    "portal": (107, 180, 255),   # 传送：亮蓝
+    "trap": (214, 68, 56),       # 陷阱：红（危险语义）
+    "buff": (61, 138, 214),      # 增益：中蓝
+    "wall": (150, 146, 142),     # 阻挡：中性灰
+    "special": (143, 194, 240),  # 特殊：淡蓝
 }
 
+#: 路线配色。第一条是 ACCENT 蓝（默认），后面用蓝的深浅 + 红交替。
+#: 相邻两层路线在图上最容易重叠，所以冷暖交替排，不会糊成一根线。
 ROUTE_PALETTE = [
-    (92, 176, 255), (240, 149, 74), (63, 209, 139), (240, 96, 90),
-    (176, 125, 224), (46, 196, 182), (245, 197, 66), (74, 144, 226),
-    (240, 106, 168), (22, 199, 154),
+    (92, 176, 255),    # 蓝 主
+    (231, 76, 60),     # 红
+    (143, 194, 240),   # 蓝 浅
+    (255, 138, 122),   # 红 浅
+    (61, 138, 214),    # 蓝 中
+    (192, 57, 43),     # 红 中
+    (107, 180, 255),   # 蓝 更浅
+    (255, 180, 162),   # 红 最浅
+    (44, 107, 168),    # 蓝 深
+    (142, 43, 32),     # 红 深
 ]
 
 #: 超采样倍率：2x 已足够消除锯齿，3x 收益递减而内存翻倍
 SS = 2
+
+#: 主图（静态层）参考格宽。主图以固定分辨率烘焙：按 ``MASTER_CELL`` 格宽 +
+#: ``SS`` 倍超采样绘制后**不再缩小**，得到每格 ``MASTER_CELL*SS`` 像素的
+#: 高清底图。之后缩放 / 平移 / 窗口调整只对主图做「裁剪 + LANCZOS 缩放」，
+#: 不再按视口重建整张底图（这才是缩放卡顿的根因）。
+#:
+#: 内存：最大图 37×31 → 主图 3552×2976 ≈ 31MB，单图缓存可接受。
+#: 代价：放大到格宽超过 96px 时是 LANCZOS 放大（略糊）。大图格宽通常只有
+#: 14~68px，正常缩放不会触顶；想要更清晰把 ``MASTER_CELL`` 调大即可。
+MASTER_CELL = 48
+
+#: 主图四周的出血边（master-space 像素，未再乘 SS）。出怪点计数文字、
+#: 光晕、隔离视图的「起点」角标都会略微溢出格网边界，留一圈边不裁掉。
+MASTER_PAD = MASTER_CELL
 
 # ---------------------------------------------------------------- 字体
 
@@ -360,8 +402,23 @@ class MapRenderer:
         self.zoom = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
-        self._base: Optional[Image.Image] = None
-        self._base_key = None
+        #: 沙盘推演层。为 None 表示不在沙盘模式，一个像素都不画。
+        #: 结构由 ui/sandbox_panel 填：{"boxes": set, "operators": dict,
+        #: "range": set, "block": set, "slow": set}
+        self.sandbox = None
+        #: 点中的传送门：``{"src", "dst", "certain", "jump", "exit_path"}``。
+        #: ``jump`` 是入口→出口的可走路径（通常为空：传送不是走路），
+        #: ``exit_path`` 是出口→最近蓝门的可走路径。为 None 表示没选中。
+        self.portal_link = None
+        #: 静态层主图（固定分辨率烘焙），见 MASTER_CELL 的说明。
+        self._master: Optional[Image.Image] = None
+        self._master_key = None
+        #: 主图对应地图的 (cols, rows)，用于翻转时裁剪 / 有效性判断。
+        self._master_dims: Optional[Tuple[int, int]] = None
+        #: 主图按当前视口缩放后的帧底缓存：缩放 / 平移 / 窗口变化只重算
+        #: 这一步（一次 LANCZOS 缩放），不重烘焙主图；动画播放时直接复用。
+        self._scaled: Optional[Image.Image] = None
+        self._scaled_key = None
 
     # ------------------------------------------------------------ 几何
 
@@ -371,9 +428,12 @@ class MapRenderer:
         self.invalidate()
 
     def invalidate(self) -> None:
-        """标记静态层需要重建。"""
-        self._base = None
-        self._base_key = None
+        """标记静态层主图需要重建。"""
+        self._master = None
+        self._master_key = None
+        self._master_dims = None
+        self._scaled = None
+        self._scaled_key = None
 
     def disp_rc(self, row: float, col: float):
         """数据格坐标 -> 显示格坐标（应用翻转）。
@@ -471,70 +531,237 @@ class MapRenderer:
 
     # ------------------------------------------------------------ 渲染
 
+    def _master_static_key(self):
+        """静态层主图的重烘焙 key（不含任何视口相关字段）。"""
+        return (id(self.game_map),
+                self.show_ground, self.show_fly, self.show_routes, self.show_cost,
+                self.show_dots, self.highlight_route, self.isolate_route,
+                self.show_mech,
+                self.flip_v, self.flip_h,
+                len(self.analyses), tuple(sorted(self.spawn_points.keys())),
+                # 隔离视图下高亮标记画在静态层（那张图没有敌人圆点），
+                # 所以必须进 key，否则点了表格行地图上不会有反应。
+                self.highlight_enemy if self.isolate_route is not None else None,
+                # 沙盘棋子画在动态层，只有「有没有进沙盘模式」影响静态层
+                # （沙盘模式下要把默认敌人圆点让位给棋子）。
+                self.sandbox is not None)
+
+    def _ensure_master(self) -> Optional[Image.Image]:
+        """返回当前地图的静态主图，必要时重烘焙。
+
+        主图按固定 ``MASTER_CELL`` 烘焙，与视口大小 / 缩放 / 平移完全
+        解耦，所以缩放、平移、窗口调整都不会触发重烘焙。"""
+        gm = self.game_map
+        if not gm:
+            return None
+        key = self._master_static_key()
+        if self._master is None or key != self._master_key:
+            self._master = self._build_master(gm)
+            self._master_key = key
+            self._master_dims = (gm.width, gm.height)
+            self._scaled = None
+            self._scaled_key = None
+        return self._master
+
     def render(self, enemies: Optional[Sequence[dict]] = None) -> Image.Image:
         """渲染一整帧。静态层有缓存，只在必要时重建。"""
         if enemies is not None:
             self.frame_enemies = list(enemies)
-        # 注意：不要把 hover / selected / frame_enemies 放进 key。
+        # 注意：不要把 hover / selected / frame_enemies 放进静态 key。
         # 它们画在动态层，放进来会导致鼠标每动一格就重建静态层（约 60ms），
         # 播放与悬停都会一顿一顿的。highlight_route 会改变整条路线配色，
         # 必须留在 key 里。
-        key = (id(self.game_map), self.width, self.height, self.cell,
-               self.show_ground, self.show_fly, self.show_routes, self.show_cost,
-               self.show_dots, self.highlight_route, self.isolate_route,
-               self.show_mech,
-               self.flip_v, self.flip_h, self.origin_x, self.origin_y,
-               len(self.analyses), tuple(sorted(self.spawn_points.keys())),
-               # 隔离视图下高亮标记画在静态层（那张图没有敌人圆点），
-               # 所以必须进 key，否则点了表格行地图上不会有反应。
-               self.highlight_enemy if self.isolate_route is not None else None)
-        if self._base is None or key != self._base_key:
-            self._base = self._build_base()
-            self._base_key = key
-        im = self._base.copy()
+        w, h = self.width, self.height
+        if w < 1:
+            w = 1
+        if h < 1:
+            h = 1
+        master = self._ensure_master()
+        if master is None:
+            return self._render_empty(w, h)
+        # 帧底 = 主图缩到当前视口 + 坐标轴。视口不变（动画播放、悬停、
+        # 沙盘拖动）时直接复用帧底，只重画动态层；缩放 / 平移 / 窗口变化
+        # 才重算一次 crop+resize，不重烘焙主图。
+        base_key = (self._master_key, w, h, self.cell,
+                    self.origin_x, self.origin_y)
+        if self._scaled is None or self._scaled_key != base_key:
+            base = self._master_to_frame(master, w, h)
+            if self.game_map:
+                d = ImageDraw.Draw(base, "RGBA")
+                self._draw_coords(d, self.game_map)
+            self._scaled = base
+            self._scaled_key = base_key
+        im = self._scaled.copy()
         self._draw_enemies(im)
+        self._draw_portal_link(im)
+        self._draw_sandbox(im)
+        self._draw_spawn_hover(im)
         self._draw_hover_layer(im)
+        return im
+
+    def _draw_portal_link(self, im: Image.Image) -> None:
+        """画「点中的传送门」：入口到出口的跳跃线 + 出口往蓝门的实走路由。
+
+        这两段必须是两种画法，之前只画入口→出口的 ``find_path`` 结果是
+        错的——传送不是走路，入口格到出口格通常**根本不可达**（地图中间
+        隔着不可通行区），于是永远画出个空路径，看着就是「点了没反应」。
+
+        * 入口 → 出口：虚线直连（琥珀色表示配对为推断、绿色表示可信）。
+          它就是一次空间跳跃，画虚直线才是对的。
+        * 出口 → 蓝门：``find_path`` 的实走折线，这才是用户想看的东西
+          ——「从这扇门出来之后敌人往哪儿走」。
+        """
+        link = self.portal_link
+        gm = self.game_map
+        if not link or not gm:
+            return
+        try:
+            src = tuple(link["src"])
+            dst = tuple(link["dst"])
+        except (KeyError, TypeError):
+            return
+        certain = bool(link.get("certain", True))
+        jump = [tuple(p) for p in (link.get("jump") or [])]
+        exit_path = [tuple(p) for p in (link.get("exit_path") or [])]
+        d = ImageDraw.Draw(im, "RGBA")
+        col = PORTAL_LINK_OK if certain else PORTAL_LINK_GUESS
+        w = max(2, self.cell // 14)
+
+        # ---- 出口 -> 蓝门：实走路由（看得见「敌人会往哪走」）
+        if exit_path:
+            pts = [self.tile_xy(float(r), float(c)) for (r, c) in exit_path]
+            for i in range(len(pts) - 1):
+                a = _rgba(PORTAL_LINK_OK, 110 + int(130 * (i + 1) / len(pts)))
+                d.line([pts[i], pts[i + 1]], fill=a,
+                       width=max(2, self.cell // 12))
+            r_end, c_end = exit_path[-1]
+            x, y = self.tile_xy(float(r_end), float(c_end))
+            rad = self.cell * 0.30
+            d.ellipse([x - rad, y - rad, x + rad, y + rad],
+                      fill=_rgba(PORTAL_LINK_OK, 90),
+                      outline=_rgba(PORTAL_LINK_OK, 255), width=w)
+
+        # ---- 入口 -> 出口：传送跳跃，虚线
+        x0, y0 = self.tile_xy(float(src[0]), float(src[1]))
+        x1, y1 = self.tile_xy(float(dst[0]), float(dst[1]))
+        if jump:
+            pts = [self.tile_xy(float(r), float(c)) for (r, c) in jump]
+            for i in range(len(pts) - 1):
+                _dashed(d, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
+                        _rgba(col, 225), width=w)
+        else:
+            _dashed(d, x0, y0, x1, y1, _rgba(col, 225), width=w,
+                    dash=9.0, gap=7.0)
+        # 两端各套一个圈，标「入 / 出」
+        for (r, c), tag in ((src, "入"), (dst, "出")):
+            x, y = self.tile_xy(float(r), float(c))
+            rad = self.cell * 0.42
+            d.ellipse([x - rad, y - rad, x + rad, y + rad],
+                      outline=_rgba(col, 245), width=max(2, self.cell // 10))
+            f = _font(max(9, int(self.cell * 0.26)))
+            d.text((x, y), tag, font=f, fill=_rgba(col, 255), anchor="mm")
+
+    def _master_to_frame(self, master: Image.Image, w: int, h: int) -> Image.Image:
+        """把固定分辨率主图裁剪 + 缩放到当前视口帧底。
+
+        主图存的是每格 ``MASTER_CELL`` 像素（已从 SS 超采样缩回），网格
+        原点在 master 像素 ``(MASTER_PAD, MASTER_PAD)``。视口里同一格原
+        点在 ``(origin_x, origin_y)``，两者是同一个仿射：
+        ``view = s * master + off``，其中 ``s = cell / MASTER_CELL``、
+        ``off = origin - s * MASTER_PAD``。据此反推视口 [0,w]×[0,h] 覆盖
+        的 master 区间，只裁剪并缩放这一段：居中（地图比视口小，两边留
+        BG）与放大裁切（地图比视口大）都自然成立。"""
+        cell = self.cell
+        if cell <= 0:
+            cell = 1
+        s = cell / MASTER_CELL
+        inv = MASTER_CELL / cell
+        off_x = self.origin_x - s * MASTER_PAD
+        off_y = self.origin_y - s * MASTER_PAD
+
+        def _span(v0: int, v1: int, origin: int, msize: int):
+            m0 = MASTER_PAD + (v0 - origin) * inv
+            m1 = MASTER_PAD + (v1 - origin) * inv
+            lo = max(0, int(math.floor(m0)))
+            hi = min(msize, int(math.ceil(m1)))
+            return lo, hi
+
+        x0, x1 = _span(0, w, self.origin_x, master.width)
+        y0, y1 = _span(0, h, self.origin_y, master.height)
+        if x1 <= x0 or y1 <= y0:
+            return Image.new("RGBA", (w, h), BG)
+        crop = master.crop((x0, y0, x1, y1))
+        cw = max(1, int(round((x1 - x0) * s)))
+        ch = max(1, int(round((y1 - y0) * s)))
+        # 保持 RGBA：动态层要 alpha_composite，转成 RGB 会抛错。
+        crop = crop.resize((cw, ch), Image.LANCZOS)
+        px = int(round(s * x0 + off_x))
+        py = int(round(s * y0 + off_y))
+        out = Image.new("RGBA", (w, h), BG)
+        out.paste(crop, (px, py))
+        return out
+
+    def _render_empty(self, w: int, h: int) -> Image.Image:
+        im = Image.new("RGB", (w, h), BG)
+        dd = ImageDraw.Draw(im)
+        dd.text((w // 2, h // 2), "请选择关卡后加载地图",
+                font=_font(14), fill=_rgba(TEXT_DIM), anchor="mm")
         return im
 
     # -------------------------------------------------- 静态层
 
-    def _build_base(self) -> Image.Image:
-        w, h = self.width, self.height
-        ss = SS
-        im = Image.new("RGB", (w * ss, h * ss), BG)
-        gm = self.game_map
-        if not gm:
-            im = im.resize((w, h), Image.LANCZOS)
-            dd = ImageDraw.Draw(im)
-            dd.text((w // 2, h // 2), "请选择关卡后加载地图",
-                    font=_font(14), fill=_rgba(TEXT_DIM), anchor="mm")
-            return im
+    def _build_master(self, gm: GameMap) -> Image.Image:
+        """按固定分辨率烘焙静态主图。
 
-        self._draw_tiles(ImageDraw.Draw(im), gm, ss)
-        # 机制机关（传送门 / 火山 / 留声机 ...）画在底图上、路线之下。
-        # 它们是「地形自带的东西」，用半透明色块 + 符号表示，不能像路线
-        # 那样整块盖住格子，否则地图会看不清。这里直接画在底图层，
-        # 天然不透明，也就不需要 alpha 合成。
-        self._draw_mechanisms(im, gm, ss)
-        # 路线 / 出怪点 / 坐标带半透明，必须画在覆盖层上再整体合成，
-        # 否则半透明像素只是把 alpha 写进底图，Tk 贴图时会与窗口背景
-        # 混色，整张图变灰变脏（旧版就是这个毛病）。
-        ov = Image.new("RGBA", im.size, (0, 0, 0, 0))
-        od = ImageDraw.Draw(ov)
-        self._draw_coords(od, gm, ss)
-        self._draw_routes(od, gm, ss)
-        self._draw_spawn_points(im, ov, od, gm, ss)
-        self._draw_doors(od, gm, ss)   # 真实红门 / 蓝门
-        # 传送门的配对连线要压在门框之上，否则会被其他覆盖物切断
-        self._draw_portal_links(od, gm, ss)
-        # 罚站时长只在隔离视图里画，且必须压在最上层，否则会被门框/出怪点盖住
-        self._draw_route_marks(od, gm, ss)
-        # 隔离视图不放动画，没有敌人圆点可套环，于是把高亮做成
-        # 「路线起点处的呼吸环 + 指向路线的箭头」，让用户依然能一眼
-        # 定位到刚才点的那一行是哪条线。
-        self._draw_isolate_highlight(od, gm, ss)
-        out = Image.alpha_composite(im.convert("RGBA"), ov)
-        return out.resize((w, h), Image.LANCZOS)
+        画出全图显示格（含 MASTER_PAD 出血边），用固定 ``MASTER_CELL``
+        格宽 + ``SS`` 超采样，最终缩到每格 ``MASTER_CELL`` 像素。这里
+        **只**画会随地图缩放一起走的静态层（地形 / 机关 / 路线 / 出怪
+        点 / 门 / 传送 / 罚站时长 / 隔离高亮）；坐标轴是固定字号，挪到
+        每帧的 ``_draw_coords`` 里画。
+        """
+        mcell = MASTER_CELL * SS
+        ss = SS
+        # 显示格数（全图），翻转只会换格子位置，不改变总格数
+        gw = gm.width * mcell
+        gh = gm.height * mcell
+        pad = MASTER_PAD * SS
+        w = gw + pad * 2
+        h = gh + pad * 2
+        im = Image.new("RGB", (w, h), BG)
+        # 临时把绘制几何切到 master 空间：cell / 原点按 master 计算，
+        # 这样所有 *_draw 函数不用改签名就能画出主图。
+        saved_cell = self.cell
+        saved_ox, saved_oy = self.origin_x, self.origin_y
+        self.cell = MASTER_CELL
+        # 原点用 cell 空间（MASTER_PAD），_draw_* 会再乘 ss 得到
+        # 真正的 master 像素 pad（MASTER_PAD * SS）。写成 pad（=MASTER_PAD*SS）
+        # 会被二次乘 ss，导致主图整体偏移。
+        self.origin_x = MASTER_PAD
+        self.origin_y = MASTER_PAD
+        try:
+            self._draw_tiles(ImageDraw.Draw(im), gm, ss)
+            # 机制机关（传送门 / 火山 / 留声机 ...）画在底图上、路线之下。
+            self._draw_mechanisms(im, gm, ss)
+            # 路线 / 出怪点 / 罚站时长带半透明，必须画在覆盖层上再整体
+            # 合成，否则半透明像素只是把 alpha 写进底图，Tk 贴图时会与
+            # 窗口背景混色，整张图变灰变脏（旧版就是这个毛病）。
+            ov = Image.new("RGBA", im.size, (0, 0, 0, 0))
+            od = ImageDraw.Draw(ov)
+            self._draw_routes(od, gm, ss)
+            self._draw_spawn_points(im, ov, od, gm, ss)
+            self._draw_doors(od, gm, ss)   # 真实红门 / 蓝门
+            # 传送门的配对连线要压在门框之上，否则会被其他覆盖物切断
+            self._draw_portal_links(od, gm, ss)
+            # 罚站时长只在隔离视图里画，且必须压在最上层
+            self._draw_route_marks(od, gm, ss)
+            # 隔离视图不放动画，没有敌人圆点可套环，于是把高亮做成
+            # 「路线起点处的呼吸环 + 指向路线的箭头」。
+            self._draw_isolate_highlight(od, gm, ss)
+            out = Image.alpha_composite(im.convert("RGBA"), ov)
+            return out.resize((w // SS, h // SS), Image.LANCZOS)
+        finally:
+            self.cell = saved_cell
+            self.origin_x, self.origin_y = saved_ox, saved_oy
 
     def _tile_fill(self, t: Optional[Tile]):
         """地块底色与高光色。"""
@@ -735,11 +962,11 @@ class MapRenderer:
         # 没有隔离、也没有高亮 → 不画任何路线，保持地图干净
         if self.highlight_route is None:
             return
-        if not (0 <= self.highlight_route < len(gm.routes)):
-            return
         i = self.highlight_route
-        route = gm.routes[i]
-        color = ROUTE_PALETTE[i % len(ROUTE_PALETTE)]
+        route = gm.route_by_index(i)
+        if route is None:
+            return
+        color = ROUTE_PALETTE[(route.index or i) % len(ROUTE_PALETTE)]
         segs = self._smooth(self._route_pixels(route))
         lw = max(2, int(ss * 2.6))
         for s in segs:
@@ -764,9 +991,9 @@ class MapRenderer:
         """
         if self.isolate_route is None or not gm.routes:
             return
-        if not (0 <= self.isolate_route < len(gm.routes)):
+        route = gm.route_by_index(self.isolate_route)
+        if route is None:
             return
-        route = gm.routes[self.isolate_route]
         cell = self.cell * ss
         if self.cell < 14:
             return
@@ -779,7 +1006,7 @@ class MapRenderer:
         for cp in route.checkpoints:
             if cp.has_position:
                 last = (int(round(cp.row)), int(round(cp.col)))
-            elif cp.is_wait:
+            elif cp.wait_time and cp.is_duration_wait:
                 waits[last] = waits.get(last, 0.0) + cp.wait_time
         # 排序：瞬移落点先画，罚站标记后画，保证标记在上层
         for (r, c), secs in sorted(waits.items()):
@@ -820,10 +1047,10 @@ class MapRenderer:
         """
         if self.isolate_route is None or not gm.routes:
             return False
-        if not (0 <= self.isolate_route < len(gm.routes)):
+        route = gm.route_by_index(self.isolate_route)
+        if route is None:
             return False
-        route = gm.routes[self.isolate_route]
-        color = ROUTE_PALETTE[self.isolate_route % len(ROUTE_PALETTE)]
+        color = ROUTE_PALETTE[(route.index or self.isolate_route) % len(ROUTE_PALETTE)]
         segs = self._smooth(self._route_pixels(route))
         lw = max(3, int(ss * 3.2))
         for s in segs:
@@ -997,9 +1224,6 @@ class MapRenderer:
             x, y = self.tile_xy(row, col)
             x, y = x * ss, y * ss
             r = rad * ss
-            hov = self.hover_spawn == (row, col)
-            if hov:
-                r *= 1.25
             # 柔光晕：单独模糊后合成到覆盖层，避免裁切与硬边
             gsz = int(r * 6) + 8
             gl = Image.new("RGBA", (gsz, gsz), (0, 0, 0, 0))
@@ -1034,19 +1258,65 @@ class MapRenderer:
                        fill=_rgba((255, 205, 190)), anchor="lm",
                        stroke_width=max(1, ss), stroke_fill=_rgba((10, 12, 18)))
 
+    def _draw_spawn_hover(self, im: Image.Image) -> None:
+        """悬停出怪点时放大该标记（动态层，不进主图缓存）。
+
+        主图里的出怪点按固定大小烘焙；悬停放大是鼠标态，只能在每帧
+        动态层重画被悬停的那一个点，否则鼠标每动一格都要重烘焙整张
+        主图（约 60ms+）。这里只画一个点，开销可忽略。
+        """
+        if not self.hover_spawn or not self.spawn_points:
+            return
+        row, col = self.hover_spawn
+        if (row, col) not in self.spawn_points:
+            return
+        items = self.spawn_points[(row, col)]
+        x, y = self.tile_xy(row, col)
+        cell = self.cell
+        rad = cell * 0.20 * 1.25      # 与静态层同尺寸，再放大 1.25
+        d = ImageDraw.Draw(im, "RGBA")
+        # 柔光晕（画法同 _draw_spawn_points，只是画在视口分辨率上）
+        gsz = int(rad * 6) + 8
+        gl = Image.new("RGBA", (gsz, gsz), (0, 0, 0, 0))
+        ImageDraw.Draw(gl).ellipse(
+            [gsz / 2 - rad * 1.55, gsz / 2 - rad * 1.55,
+             gsz / 2 + rad * 1.55, gsz / 2 + rad * 1.55],
+            fill=_rgba(SPAWN, 120))
+        gl = gl.filter(ImageFilter.GaussianBlur(rad * 0.55))
+        im.alpha_composite(gl, (int(x - gsz / 2), int(y - gsz / 2)))
+        d.rectangle([x - rad * 0.72, y - rad * 0.72,
+                     x + rad * 0.72, y + rad * 0.72],
+                    fill=_rgba(SPAWN, 60))
+        d.polygon([(x, y - rad * 0.30), (x - rad * 0.34, y + rad * 0.26),
+                   (x + rad * 0.34, y + rad * 0.26)],
+                  fill=_rgba((255, 236, 232), 225))
+        total = sum(it[1] for it in items)
+        if self.cell >= 24:
+            fs = max(7, int(self.cell * 0.26))
+            try:
+                t0 = min(float(it[2]) for it in items)
+            except (TypeError, ValueError, IndexError):
+                t0 = None
+            cap = str(total)
+            if t0 is not None:
+                cap = "%d @%.0fs" % (total, t0)
+            d.text((x + rad * 1.20, y), cap, font=_font(fs, True),
+                   fill=_rgba((255, 205, 190)), anchor="lm",
+                   stroke_width=1, stroke_fill=_rgba((10, 12, 18)))
+
     # -------------------------------------------------- 坐标
 
-    def _draw_coords(self, d, gm, ss) -> None:
-        cell = self.cell * ss
-        ox, oy = self.origin_x * ss, self.origin_y * ss
-        fs = max(8, int(10 * ss))
-        # 这里只画「常态」坐标；悬停高亮由 _draw_hover_layer 覆盖重画，
-        # 以免把悬停状态固化进静态层缓存。
-        #
-        # 翻转后坐标轴不能再用 gm.height - r：用户按下翻转就是希望眼前
-        # 这张图跟游戏里一致，那么「自下往上编号」也必须跟着屏幕走，
-        # 否则最下面一行还是写着 1，翻转等于白翻。这里改成按**显示行**
-        # 编号，即显示最下面一行永远是 1。
+    def _draw_coords(self, d, gm) -> None:
+        """坐标轴标签：固定字号、不随缩放走，每帧按视口重画（不进主图）。
+
+        悬停高亮由 _draw_hover_layer 覆盖重画。翻转后坐标轴不能再用
+        gm.height - r：用户按下翻转就是希望眼前这张图跟游戏里一致，那么
+        「自下往上编号」也必须跟着屏幕走，否则最下面一行还是写着 1，
+        翻转等于白翻。这里按**显示行**编号，即显示最下面一行永远是 1。
+        """
+        cell = self.cell
+        ox, oy = self.origin_x, self.origin_y
+        fs = max(8, 10)
         for c in range(gm.width):
             dc = (gm.width - 1 - c) if self.flip_h else c
             x = ox + (dc + 0.5) * cell
@@ -1066,6 +1336,126 @@ class MapRenderer:
                    font=_font(fs, True), fill=_rgba(COORD), anchor="mm")
 
     # -------------------------------------------------- 动态层
+
+    def _draw_sandbox(self, im: Image.Image) -> None:
+        """画沙盘棋子：攻击范围 -> 箱子 -> 阻挡警示 -> 干员 -> 减速标记。
+
+        全部画在**动态层**，不进静态缓存——每放一个箱子都要重画一次，
+        混进静态层 key 会让整张底图（约 60 ms）跟着重建，拖动石块就卡了。
+        """
+        sb = self.sandbox
+        gm = self.game_map
+        if not sb or not gm:
+            return
+        d = ImageDraw.Draw(im, "RGBA")
+        cell = self.cell
+
+        # ---- 1. 选中干员的攻击范围（最底，半透明，不盖住任何东西）
+        rng = sb.get("range") or set()
+        if rng:
+            for (r, c) in rng:
+                if not (0 <= r < gm.height and 0 <= c < gm.width):
+                    continue
+                x, y = self.tile_xy(float(r), float(c))
+                h = cell / 2.0 - 1
+                d.rounded_rectangle([x - h, y - h, x + h, y + h], radius=2,
+                                    fill=_rgba(PIECE_RANGE, 52),
+                                    outline=_rgba(PIECE_RANGE, 120))
+            # 范围外框加一圈，让「范围」和「格子底色」分得开
+            for (r, c) in rng:
+                if not (0 <= r < gm.height and 0 <= c < gm.width):
+                    continue
+                for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                    if (r + dr, c + dc) in rng:
+                        continue
+                    x0, y0 = self.tile_xy(float(r), float(c))
+                    x1, y1 = self.tile_xy(float(r + dr), float(c + dc))
+                    mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+                    # 画朝外那条边
+                    if dr:
+                        yy = y0 + dr * (cell / 2.0 - 1)
+                        d.line([x0 - cell / 2.0 + 1, yy, x0 + cell / 2.0 - 1, yy],
+                               fill=_rgba(PIECE_RANGE, 190), width=2)
+                    else:
+                        xx = x0 + dc * (cell / 2.0 - 1)
+                        d.line([xx, y0 - cell / 2.0 + 1, xx, y0 + cell / 2.0 - 1],
+                               fill=_rgba(PIECE_RANGE, 190), width=2)
+
+        # ---- 2. 箱子（中性灰方块 + 亮边，形状要和敌人圆点区分开）
+        boxes = sb.get("boxes") or set()
+        for (r, c) in boxes:
+            if not (0 <= r < gm.height and 0 <= c < gm.width):
+                continue
+            x, y = self.tile_xy(float(r), float(c))
+            h = cell * 0.34
+            d.rounded_rectangle([x - h, y - h, x + h, y + h], radius=max(2, cell * 0.08),
+                                fill=_rgba(PIECE_BOX, 235),
+                                outline=_rgba(PIECE_BOX_EDGE, 255),
+                                width=max(1, cell // 16))
+            # 中间一个 X，一眼看出是「此路不通」
+            g = h * 0.45
+            w = max(1, cell // 18)
+            d.line([x - g, y - g, x + g, y + g], fill=_rgba((30, 32, 36), 220), width=w)
+            d.line([x - g, y + g, x + g, y - g], fill=_rgba((30, 32, 36), 220), width=w)
+
+        # ---- 3. 阻挡警示：路线经过 + 站着干员
+        blk = sb.get("block") or set()
+        for (r, c) in blk:
+            if not (0 <= r < gm.height and 0 <= c < gm.width):
+                continue
+            x, y = self.tile_xy(float(r), float(c))
+            h = cell / 2.0 - 1
+            d.rounded_rectangle([x - h, y - h, x + h, y + h], radius=3,
+                                outline=_rgba(PIECE_BLOCK, 235), width=2)
+
+        # ---- 4. 干员棋子（圆形 + 朝向箭头，和敌人圆点区分）
+        ops = sb.get("operators") or {}
+        fs = max(8, int(cell * 0.30))
+        for pos, piece in ops.items():
+            r, c = pos
+            if not (0 <= r < gm.height and 0 <= c < gm.width):
+                continue
+            x, y = self.tile_xy(float(r), float(c))
+            rad = cell * 0.34
+            sel = bool(sb.get("selected_op") == pos)
+            d.ellipse([x - rad, y - rad, x + rad, y + rad],
+                      fill=_rgba(PIECE_OPERATOR_DIM, 245),
+                      outline=_rgba(PIECE_OPERATOR if not sel else (255, 255, 255), 255),
+                      width=max(2, cell // 12))
+            # 朝向：朝哪边就画哪边的小三角
+            f = getattr(piece, "facing", "RIGHT") or "RIGHT"
+            tip = {"RIGHT": (x + rad * 0.95, y), "LEFT": (x - rad * 0.95, y),
+                   "UP": (x, y - rad * 0.95), "DOWN": (x, y + rad * 0.95)}.get(f)
+            if tip:
+                base = cell * 0.16
+                if f in ("LEFT", "RIGHT"):
+                    sgn = 1 if f == "RIGHT" else -1
+                    p1 = (tip[0], tip[1])
+                    p2 = (x + sgn * rad * 0.35, y - base)
+                    p3 = (x + sgn * rad * 0.35, y + base)
+                else:
+                    sgn = 1 if f == "DOWN" else -1
+                    p1 = (tip[0], tip[1])
+                    p2 = (x - base, y + sgn * rad * 0.35)
+                    p3 = (x + base, y + sgn * rad * 0.35)
+                d.polygon([p1, p2, p3], fill=_rgba(PIECE_OPERATOR, 255))
+            # 名字首字：格子上直接能认出是谁
+            name = getattr(piece, "name", "") or ""
+            if name and cell >= 22:
+                d.text((x, y - rad * 0.15), name[0], font=_font(fs, True),
+                       fill=_rgba((14, 22, 32), 255), anchor="mm")
+
+        # ---- 5. 减速标记：受影响敌人当前所在格画一圈淡蓝虚环
+        slow = sb.get("slow") or set()
+        for (r, c) in slow:
+            if not (0 <= r < gm.height and 0 <= c < gm.width):
+                continue
+            x, y = self.tile_xy(float(r), float(c))
+            rr = cell * 0.42
+            # PIL 的 ellipse 不支持虚线，用四段弧近似
+            for a0 in (0, 90, 180, 270):
+                d.arc([x - rr, y - rr, x + rr, y + rr], a0, a0 + 55,
+                      fill=_rgba(PIECE_SLOW, 235), width=max(1, cell // 18))
 
     def _draw_enemies(self, im: Image.Image) -> None:
         if not self.show_dots or not self.frame_enemies:
@@ -1159,9 +1549,9 @@ class MapRenderer:
         """
         if self.isolate_route is None or not self.highlight_enemy:
             return
-        if not (0 <= self.isolate_route < len(gm.routes)):
+        route = gm.route_by_index(self.isolate_route)
+        if route is None:
             return
-        route = gm.routes[self.isolate_route]
         r, c = route.start
         x, y = self.tile_xy(float(r), float(c))
         x, y = x * ss, y * ss

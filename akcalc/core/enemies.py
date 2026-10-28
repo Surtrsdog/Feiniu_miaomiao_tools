@@ -47,6 +47,91 @@ def _pick(override: Optional[dict], base: dict, key: str):
     return base.get(key)
 
 
+def _talent_value(override: Optional[dict], data: dict, key: str) -> float:
+    """取 ``talentBlackboard`` 里某个 key 的数值。
+
+    ``talentBlackboard`` 是**数组**而不是 ``{m_defined, m_value}`` 对象，
+    所以不能用 :func:`_pick`。关卡覆盖时整份数组被替换掉，语义是
+    「本关重写这张表」，而不是逐项 merge —— 实测 ``ro6_c_2`` 给的
+    数组就是完整三项，与库里的默认三项一一对应。
+
+    ⚠ **只认关卡覆盖，不回落到敌人库默认值**，这一点对
+    ``Revive.unmovable_duration`` 尤其重要：
+
+    * 库里只有 3 个敌人带这个键（角兽 ``enemy_1303_mhshep`` / 亢角兽
+      ``enemy_1303_mhshep_2`` / 鬣犄兽 ``enemy_1304_mhwolf``），默认都是 150s。
+    * 只有前两个真的「出场休憩」：PRTS 角兽页写「初始处于【休憩】状态：
+      不进行攻击，出场一段时间内（默认为 150 秒）持有自缚」。鬣犄兽的
+      能力只有「优先攻击角兽和亢角兽」，它的 150s 不是出场罚站。
+    * 全库 2575 个缓存关里，这个键被关卡覆盖成正值的只有 **7 处**，
+      而且全是角兽系（``ro6_c_2`` 的 90s 就是 PRTS 那句「出场 90 秒内
+      无法移动」）；另有 21 处被显式覆盖成 0.0（= 本关不休憩）。
+
+    所以「关卡显式给了正数」才是「本关确实出场罚站」的可靠信号，
+    照搬库默认值会给大约 20 关的鬣犄兽凭空加 150 秒。
+    没有覆盖时走 :func:`spawn_unmovable_default` 的角兽系白名单，
+    这样 CF-1…CF-9 那些没写覆盖的角兽关也能显示对。
+    """
+    if not override:
+        return 0.0
+    tb = override.get("talentBlackboard")
+    if not isinstance(tb, list):
+        return 0.0
+    for it in tb:
+        if isinstance(it, dict) and it.get("key") == key:
+            v = it.get("value")
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+    return 0.0
+
+
+#: 真的「出场休憩」的敌人 —— 只有角兽与亢角兽（handbook abilityList 里
+#: 带「休憩」二字的就这两个，全库 2186 个敌人里查证过）。
+#: 关卡用私有 id 引用它们时形如 ``enemy_1303_mhshep_a/_b/_c``，用前缀匹配。
+REST_ENEMY_PREFIXES = ("enemy_1303_mhshep",)
+
+#: PRTS 角兽页：「出场一段时间内（**默认为 150 秒**）持有自缚」。
+REST_DEFAULT_SECONDS = 150.0
+
+
+def spawn_unmovable_default(enemy_id: str) -> float:
+    """敌人库里没被关卡覆盖时的默认出场罚站时长。
+
+    只对角兽系返回 150s；鬣犄兽等一律 0。
+    """
+    eid = str(enemy_id or "")
+    for pre in REST_ENEMY_PREFIXES:
+        if eid == pre or eid.startswith(pre + "_"):
+            return REST_DEFAULT_SECONDS
+    return 0.0
+
+
+def spawn_unmovable_of_ref(ref: Optional[dict]) -> float:
+    """本关这条 ``enemyDbRefs`` 记录的「出场原地站多久」（秒）。0 表示不站。
+
+    取值顺序：
+
+    1. 关卡 ``overwrittenData.talentBlackboard`` 里显式给的
+       ``Revive.unmovable_duration``（``ro6_c_2`` 的 90s 就是这条）。
+       显式给 0.0 表示「本关不休憩」，要尊重它。
+    2. 没写覆盖时，角兽系回落 150s（PRTS 写的默认值），其余敌人 0。
+
+    刻意不查敌人库本体：关卡会用**私有 id**引用敌人，
+    ``enemy_1303_mhshep_b`` / ``_c`` 这类变体在敌人库里根本不存在
+    （``act24side_01``、``rogue5_2-2`` 都这么用），一旦要求先 ``stats()``
+    成功，这些关的罚站就全丢了。私有变体靠前缀识别即可。
+    """
+    if not isinstance(ref, dict):
+        return 0.0
+    ov = ref.get("overwrittenData")
+    if isinstance(ov, dict):
+        tb = ov.get("talentBlackboard")
+        if isinstance(tb, list):
+            # 有覆盖就以覆盖为准，0.0 也是有效答案
+            return max(0.0, _talent_value(ov, {}, "Revive.unmovable_duration"))
+    return spawn_unmovable_default(str(ref.get("id") or ""))
+
+
 def parse_enemy_data(enemy_id: str, entry: dict,
                      override: Optional[dict] = None) -> EnemyStats:
     """从敌人库单体 entry（含 enemyData）构造 EnemyStats。"""
@@ -83,6 +168,8 @@ def parse_enemy_data(enemy_id: str, entry: dict,
         attack_interval=attr("baseAttackTime") or 1.5,
         is_flying=(str(motion).upper() == "FLY"),
         damage_type="PHYSICAL",
+        spawn_unmovable=spawn_unmovable_of_ref(
+            {"id": enemy_id, "overwrittenData": override}),
     )
     return ev
 

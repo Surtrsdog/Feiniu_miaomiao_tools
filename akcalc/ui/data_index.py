@@ -18,9 +18,12 @@ from typing import Dict, List, Optional, Tuple
 from ..core import enemy_class as ECLS
 from ..core import enemy_codex as EC
 from ..core import enemy_icons as EI
+from ..core import enemy_skills as ES
 from ..core import operator_icons as OI
 from ..core import skilldata as SD
 from ..core import skills as SK
+from .annotation_card import AnnotationCard, attach_buttons
+from . import skill_render as ESR
 from .code_viewer import CodeViewerDialog
 from .widgets import (ACCENT, ACCENT_SOFT, ACCENT_TXT, BG, BG_DEEP, BG_PANEL, BG_SUNKEN,
                       BORDER, CARD, DIVIDER, FG, FG_DIM, FONT_NUM, FONT_UI,
@@ -290,8 +293,14 @@ def _fsign(v) -> str:
         return "—"
 
 
-def _back_bar(master, app, title: str, subtitle: str) -> tk.Frame:
-    """顶部返回条，跟伤害 / 寻路视图保持一致。"""
+def _back_bar(master, app, title: str, subtitle: str,
+              anno_kind: str = "", on_change=None) -> tk.Frame:
+    """顶部返回条，跟伤害 / 寻路视图保持一致。
+
+    ``anno_kind`` 非空时在右侧挂上该类批注的「导出 / 导入」按钮。放返回条
+    而不是页面里，是因为批注是**整类**的操作（导出全部怪物批注），不该
+    跟某一只怪绑定在一起。
+    """
     bar = tk.Frame(master, background=BG_PANEL, highlightthickness=1,
                    highlightbackground=DIVIDER)
     bar.pack(fill="x")
@@ -308,6 +317,8 @@ def _back_bar(master, app, title: str, subtitle: str) -> tk.Frame:
     if subtitle:
         tk.Label(inner, text=subtitle, background=BG_PANEL, foreground=FG_DIM,
                  font=(FONT_UI, FS_SMALL)).pack(side="left", padx=(PAD_S, 0))
+    if anno_kind:
+        attach_buttons(inner, app, anno_kind, on_change)
     return bar
 
 
@@ -377,10 +388,17 @@ def _favors_text(v) -> str:
 class _IndexView(tk.Frame):
     """左列表 + 右详情的通用骨架。"""
 
+    #: 本页批注存到哪一类（core/annotations.py 的 KINDS）。空串表示这一页
+    #: 不支持批注（数据字段图鉴里的「条目」是字段名，不是游戏实体）。
+    ANNO_KIND = ""
+
     def __init__(self, master, app, title: str, subtitle: str):
         super().__init__(master, background=BG)
         self.app = app
-        _back_bar(self, app, title, subtitle)
+        #: 当前详情页的批注卡（没有 / 已随详情销毁时为 None）
+        self._anno = None
+        _back_bar(self, app, title, subtitle, self.ANNO_KIND,
+                  self._anno_changed)
 
         body = tk.Frame(self, background=BG)
         body.pack(fill="both", expand=True, padx=PAD_L, pady=PAD_M)
@@ -575,7 +593,20 @@ class _IndexView(tk.Frame):
 
         另外顺手把滚动位置复位：新条目从顶部看起，否则如果上一条滚到
         了底部，新条目的内容高度不够时会被钳在中间的怪位置。
+
+        **动手销毁之前必须先把批注 flush 掉**：批注卡是「输入即保存」，
+        用户敲完最后一个字立刻点下一条（Tk 里这中间根本没有 400ms），
+        防抖定时器还没触发，一 destroy 那几个字就永远没了。这里同步写一次
+        比依赖 <Destroy> 可靠——Tk 的 <Destroy> 触发顺序与控件可用性都
+        不适合托付数据。
         """
+        card = getattr(self, "_anno", None)
+        if card is not None:
+            try:
+                card.flush()
+            except Exception:
+                pass
+            self._anno = None
         kids = self.right_inner.winfo_children()
         if not kids:
             try:
@@ -603,9 +634,50 @@ class _IndexView(tk.Frame):
         except Exception:
             pass
 
+    # ------------------------------------------------------------ 批注
+
+    def _anno_card(self, key: str, name: str = "") -> None:
+        """在右侧详情末尾挂一张「我的批注」卡。
+
+        ``key`` 必须是稳定标识（enemy_id / char_id），不是中文名——中文名
+        会随官方改译名而变，按名字存的批注改一次名就全成孤儿了。
+        """
+        self._anno = None
+        kind = self.ANNO_KIND
+        if not kind or not key:
+            return
+        card = AnnotationCard(self.right_inner, self.app, kind, key, name=name)
+        card.pack(fill="x", pady=(0, PAD_S))
+        self._anno = card
+
+    def _anno_changed(self) -> None:
+        """导入完成后让当前批注卡立刻显示合并结果。"""
+        card = getattr(self, "_anno", None)
+        if card is not None:
+            try:
+                card.reload()
+            except Exception:
+                pass
+
+    def suspend(self) -> None:
+        """切走视图时把没落盘的批注写掉。
+
+        ``app.show_view`` 会对离开的视图调这个钩子（寻路分析用它停播放
+        定时器）。批注共用这个钩子：用户敲完字直接点「返回」，视图还在
+        但已经看不见了，不能指望 <FocusOut>——它未必被触发。
+        """
+        card = getattr(self, "_anno", None)
+        if card is not None:
+            try:
+                card.flush()
+            except Exception:
+                pass
+
 
 class OperatorIndexView(_IndexView):
     """干员数据：头像 / 职业分支 / 面板（可选精英化等级）/ 信赖 / 潜能 / 模组 / 天赋 / 技能。"""
+
+    ANNO_KIND = "operator"
 
     def __init__(self, master, app):
         super().__init__(master, app, "干员数据", "输入名字筛选，点条目看档案")
@@ -810,6 +882,10 @@ class OperatorIndexView(_IndexView):
             traceback.print_exc()
             self._text_card("技能", ["技能数据渲染失败，请查看控制台日志。"])
 
+        # 批注放最后：用户看完面板 / 天赋 / 技能才知道该写什么。
+        # 按 char_id 存，不按显示名——名字会改，id 不会。
+        self._anno_card(str(o.get("char_id") or ""), name)
+
     # ------------------------------------------------------------ 头部
 
     def _build_header(self, o: dict) -> None:
@@ -859,7 +935,9 @@ class OperatorIndexView(_IndexView):
         head.pack(fill="x")
         tk.Label(head, text=name, background=CARD, foreground=FG,
                  font=(FONT_UI, FS_TITLE, "bold")).pack(side="left")
-        tk.Label(head, text=stars, background=CARD, foreground=_GOLD,
+        # 星级用 ACCENT：原来是金色 #f5c542，和伤害计算页的蓝体系对不上。
+        # 星级在这里只是「稀有度标签」，不需要单独一个色相。
+        tk.Label(head, text=stars, background=CARD, foreground=ACCENT,
                  font=(FONT_UI, FS_H1)).pack(side="left", padx=(PAD_S, 0))
 
         # 职业 / 分支 / 位置 / 攻击类型徽章
@@ -1217,6 +1295,17 @@ class OperatorIndexView(_IndexView):
         title = skill_id
         if skill_name:
             title += " · %s" % skill_name
+        # 结构注解：prefabId 是什么、每个 blackboard key 的中文意思、
+        # spData 各字段口径。干员侧比敌人侧多一份 statemachines
+        # （codex_fields.json 的 525 条生命周期记录），有就直接贴上来——
+        # 那是唯一能说明「技能内部怎么跑」的官方数据。
+        level = levels[idx] if isinstance(levels, list) and levels else {}
+        env_ = ES.env(self.app, with_operator=True)
+        state = (env_.get("states") or {}).get(skill_id)
+        annot = ES.annotate_operator_skill(
+            skill_id, level, env_.get("tokens"), state, env_.get("op_bb"))
+        sections = [{"title": "技能条目 %s（levels[%d]）" % (shown, idx),
+                     "lines": ES.annotation_lines(annot, show_count=False)}]
         CodeViewerDialog(
             self, title, payload,
             github_url=_SKILL_TABLE_GH,
@@ -1225,7 +1314,8 @@ class OperatorIndexView(_IndexView):
                   "未做任何改写）。同一技能的 1~7 级与专一/专二/专三共 10 个"
                   "等级结构相同、仅数值不同，这里只展示所选的一个等级，"
                   "避免重复堆叠。GitHub 上打开的是整张技能表，可用 Ctrl+F "
-                  "搜索 skillId。") % shown)
+                  "搜索 skillId。") % shown,
+            annotate=sections)
 
     @staticmethod
     def _skill_num_text(cell: dict) -> str:
@@ -1460,6 +1550,8 @@ class OperatorIndexView(_IndexView):
 class MonsterIndexView(_IndexView):
     """怪物数据图鉴：列表 + 分类筛选 + 详情（特性 / 技能 / 抗性）。"""
 
+    ANNO_KIND = "enemy"
+
     def __init__(self, master, app):
         super().__init__(master, app, "怪物数据图鉴", "输入名字或按分类筛选")
         self.by_id: Dict[str, list] = {}
@@ -1612,6 +1704,8 @@ class MonsterIndexView(_IndexView):
             tk.Label(self.right_inner, text="本地敌人库缺这条数据（可能尚未下载）。",
                      background=BG, foreground=FG_DIM,
                      font=(FONT_UI, FS_BODY)).pack(anchor="w")
+            # 数据缺了也要能记事：用户可能就是来标记「这只本地没数据」
+            self._anno_card(eid, nm)
             return
 
         self._grid_card("基础面板", entry["stats"], 4)
@@ -1619,13 +1713,77 @@ class MonsterIndexView(_IndexView):
         self._grid_card("抗性", res, 4)
         if entry.get("immunes"):
             self._grid_card("免疫", [("状态", "、".join(entry["immunes"]))], 2)
-        if entry.get("skills"):
-            self._line_card("技能", entry["skills"])
+        # 技能：跟图鉴弹窗共用 core 的取数 + UI 的渲染，两个入口必须是
+        # 同一份字。旧版这里只列 ``enemy_codex`` 的英文键摘要
+        # （``prefabKey / cooldown / initCooldown``），跟弹窗里的 PRTS 原文
+        # 差了十万八千里，用户报的「描述没同步」就是这一处。
+        codes = ES.skill_codes(entries)
+        hb = getattr(self.app, "_handbook_index", None)
+        if hb is None:
+            try:
+                from ..core.handbook import HandbookIndex
+                hb = HandbookIndex(getattr(self.app, "paths").handbook_cache                     if getattr(self.app, "paths", None) else "")
+                hb.load()
+                self.app._handbook_index = hb
+            except Exception:
+                hb = None
+        secs = hb.sections(eid) if (hb is not None and hb.loaded) else []
+        prts = ES.load_prts(self.app).get(eid) or []
+        self._skill_card(eid, entries, secs, codes, prts)
         if entry.get("talent"):
             self._line_card("天赋 / 光环", [entry["talent"]])
 
+        # 批注放最后，跟干员页一致；key 用 enemy_id
+        self._anno_card(eid, nm)
+
+    def _skill_card(self, eid: str, entries, secs, codes, prts) -> None:
+        """技能卡：PRTS 原文 + 档案补漏 + 解包结构注解。
+
+        与图鉴弹窗（``ui/monster_codex.py``）调**同一个**
+        ``ES.build_blocks`` 和 ``ESR.render_skills``，所以两个入口出来
+        的文字逐字一致。这里只补两样本页特有的东西：右上角的「查看原
+        代码」按钮，以及默认收起的「解包数值」折叠区。
+        """
+        card = Card(self.right_inner, title="技能")
+        card.pack(fill="x", pady=(0, PAD_S))
+        tk.Button(card.head_right, text="查看原代码", relief="flat",
+                  background=BG_DEEP, foreground=ACCENT,
+                  activebackground=CARD, activeforeground=ACCENT,
+                  font=(FONT_UI, FS_MICRO), highlightthickness=1,
+                  highlightbackground=BORDER, cursor="hand2", padx=8, pady=0,
+                  command=lambda: self._open_enemy_code(eid, entries)).pack(
+            side="right")
+
+        blocks = ES.build_blocks(eid, secs, codes, prts)
+        if not blocks:
+            tk.Label(card.body, text="本地数据里没有这只怪的技能记录。",
+                     background=CARD, foreground=FG_DIM,
+                     font=(FONT_UI, FS_SMALL), anchor="w").pack(fill="x")
+        else:
+            ESR.render_skills(card.body, blocks, ES.env(self.app), wrap=540,
+                              max_bb=6)
+        if not prts:
+            tk.Label(card.body, text="PRTS 敌人页没有这只怪的技能记录，"
+                                   "描述来自游戏内敌人档案。",
+                     background=CARD, foreground=FG_DIM,
+                     font=(FONT_UI, FS_MICRO), anchor="w", justify="left",
+                     wraplength=540).pack(fill="x", pady=(PAD_S, 0))
+        unpack = ESR.unpack_lines(codes)
+        if unpack:
+            ESR.collapsible(card.body, "解包数值（enemyData.skills 原样）",
+                            unpack, wrap=530, note=ESR.UNPACK_NOTE)
+        card.harmonize()
+
     def _open_enemy_code(self, eid: str, entries) -> None:
-        """打开敌人原始 enemyData JSON（enemy_database.json）。"""
+        """打开「查看原代码」：该敌人的 skills 与 talentBlackboard。
+
+        以前直接把 level 0 的整条 entry 铺出来——``enemyData`` 里有
+        attributes / motion / range / lifePointReduce 几十个字段，想找
+        ``skills[].blackboard`` 得先翻过几百行。现在只给技能相关的两块，
+        其余数值在「基础面板」卡里已有人话版。
+
+        结构注解由查看器按 ``codex_fields.json`` 查，排在 JSON 上方。
+        """
         # 选 level 0 那一档（默认档），并把 id 也带进去便于阅读
         best = None
         for e in entries or []:
@@ -1636,14 +1794,19 @@ class MonsterIndexView(_IndexView):
             best = entries[0]
         if not isinstance(best, dict):
             return
-        payload = {"enemy_id": eid, **best}
+        ed = best.get("enemyData") or {}
+        skills = [s for s in (ed.get("skills") or []) if isinstance(s, dict)]
+        payload = {"enemy_id": eid, "skills": skills}
+        talent = ed.get("talentBlackboard")
+        if talent:
+            payload["talentBlackboard"] = talent
         CodeViewerDialog(
             self, eid, payload, github_url=_ENEMY_DB_GH,
             hint=("官方解包 zh_CN/gamedata/levels/enemydata/"
-                  "enemy_database.json 中该敌人的原始条目（enemyData 含 "
-                  "attributes / skills / talentBlackboard / motion 等字段，"
-                  "未做任何改写）。GitHub 上打开的是整张敌人库，可用 "
-                  "Ctrl+F 搜索 enemy_id。"))
+                  "enemy_database.json 中该敌人的 skills 与 talentBlackboard"
+                  "（未做任何改写；其余字段在「基础面板」里有人话版）。"
+                  "GitHub 上打开的是整张敌人库，可用 Ctrl+F 搜索 enemy_id。"),
+            annotate=ES.skill_annotation(self.app, eid, skills, talent))
 
     def _after(self, fn, *args) -> None:
         try:

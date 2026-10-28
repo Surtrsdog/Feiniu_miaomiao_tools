@@ -24,9 +24,9 @@ import time
 import tkinter as tk
 from typing import Callable, List, Optional
 
-from .widgets import (ACCENT, BG, BG_INPUT, BG_PANEL, BORDER, DIVIDER, FG,
-                      FG_DIM, FONT_NUM, FONT_UI, FS_BODY, FS_MICRO, FS_SMALL,
-                      PAD_M, PAD_S, PAD_XS, harmonize)
+from .widgets import (ACCENT, ACCENT_DIM, BG, BG_INPUT, BG_PANEL, BORDER,
+                      DIVIDER, FG, FG_DIM, FONT_NUM, FONT_UI, FS_BODY,
+                      FS_MICRO, FS_SMALL, PAD_M, PAD_S, PAD_XS, harmonize)
 
 #: 可选倍速
 SPEEDS = (0.5, 1.0, 1.5, 2.0, 4.0)
@@ -357,9 +357,12 @@ class PlaybackBar(tk.Frame):
 
     def _refresh(self) -> None:
         playing = self.state.playing
+        # 播放中用 ACCENT_DIM（蓝的深一档），暂停用 ACCENT（亮蓝）：
+        # 原来播放态是橙色 #e67e22，是这一页唯一的橙，和伤害计算的蓝体系
+        # 完全对不上。现在两态都用蓝，靠明度区分「正在跑」和「停着」。
         self.btn_play.config(
             text="⏸  暂停播放" if playing else "▶  开始播放",
-            background="#e67e22" if playing else ACCENT)
+            background=ACCENT_DIM if playing else ACCENT)
         self.lbl_time.config(text=self.state.label())
         self._draw_progress()
         self._notify_state()

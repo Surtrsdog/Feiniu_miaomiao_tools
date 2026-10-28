@@ -8,7 +8,7 @@
 
 * **字号只影响预览，点「完成」才真正应用。** 以前每点一个单选项就
   立刻遍历整棵控件树重设字体，整窗重排一次，连点几下会明显卡顿。
-* 底部显示版本号（当前 ``beta2``），并提供「从 GitHub 检查更新」
+* 底部显示版本号（当前 ``2.1``），并提供「从 GitHub 检查更新」
   按钮——只读 Releases 元数据，查到新版本就把下载链接给用户，
   不自动下载替换（单文件 exe 运行中替换自身在 Windows 上做不到）。
 """
@@ -30,7 +30,7 @@ from .widgets import (ACCENT, BG, BG_DEEP, BG_PANEL, BG_SUNKEN, BORDER,
                       PAD_XS)
 
 #: 当前版本号。发版时只改这一处。
-APP_VERSION = "beta2"
+APP_VERSION = "2.2"
 
 #: 版本号后缀说明，显示在版本号旁边
 APP_VERSION_HINT = "测试版"

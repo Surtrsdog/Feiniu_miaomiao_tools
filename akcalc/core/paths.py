@@ -143,6 +143,19 @@ class Paths:
             return None
         return os.path.join(self.seed_root, "data", "cache")
 
+    @property
+    def seed_data_dir(self) -> Optional[str]:
+        """随包的 ``akcalc/data`` 只读副本（打包后在 ``_MEIPASS`` 里）。
+
+        注意与 :attr:`seed_cache_dir` **不是**同一个地方：spec 里缓存文件
+        放到 ``data/cache``，而 catalog / 图标这类表放到 ``akcalc/data``。
+        图标就靠这个属性才能在 exe 里找到——它们只在这里读，不往可写
+        目录复制（84MB，复制一遍纯属浪费启动时间）。
+        """
+        if not self.seed_root:
+            return None
+        return os.path.join(self.seed_root, "akcalc", "data")
+
     # ------------------------------------------------------------ 初始化
 
     def ensure(self) -> None:
@@ -175,6 +188,11 @@ class Paths:
              os.path.join(self.cache_dir, "module_stats.json")),
             # 敌人档案：图鉴的「特性 / 技能描述」来自这里（abilityList）。
             ("enemy_handbook_table.json", self.handbook_cache),
+            # 召唤物数值表。spec 已经把它打进 _MEIPASS，但**这里**漏了它，
+            # 结果 exe 版「召唤物」下拉只剩「不计入」——文件明明在包里，
+            # 却没被复制到可写目录，等于没有。
+            ("summon_stats.json",
+             os.path.join(self.cache_dir, "summon_stats.json")),
         ]:
             s = os.path.join(src, name)
             if os.path.isfile(s) and not os.path.isfile(dst):
@@ -194,7 +212,12 @@ class Paths:
                          # 敌人技能名 -> prefabKey 映射（PRTS 抓取生成）。
                          # 图鉴的「技能」卡靠它把中文技能名和解包代码对上，
                          # 漏了这份就只能退回启发式，覆盖率掉一半。
-                         "enemy_skills_prts.json"):
+                         "enemy_skills_prts.json",
+                         # 集成战略（肉鸽）关卡索引。官方 stage_table 里一条
+                         # 肉鸽关卡都没有，1033 条全靠这张表；spec 把它打进
+                         # 了包里，但这里漏了复制，exe 版「集成战略」分类
+                         # 会整个变空——和 handbook 是同一类坑。
+                         "roguelike_topic_table.json"):
                 s = os.path.join(self.seed_root, "akcalc", "data", name)
                 d = os.path.join(self.data_dir, name)
                 if os.path.isfile(s) and not os.path.isfile(d):

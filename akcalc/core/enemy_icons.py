@@ -71,8 +71,16 @@ def _alias_candidates():
 
 
 def _resolve_name(name):
-    """游戏内名字 -> PRTS 文件名用名（带别名纠正，去空白）。"""
+    """游戏内名字 -> PRTS 文件名用名（带别名纠正，去空白）。
+
+    末尾的 ``\\n`` 要从**头部**去掉而不是中间的：档案表里有一批名字
+    是 ``'拥霜羽兽\\n'`` 这种带换行的（原文排版残留），不去掉就永远
+    匹配不到 ``拥霜羽兽.png``。
+    """
     n = (name or "").strip()
+    # 全角/半角空白与换行一起收掉（含 \r\t 和全角空格 \u3000）
+    n = n.replace("\r", "").replace("\n", "").replace("\t", "")
+    n = n.strip().strip("\u3000").strip()
     try:
         n = _load_alias().get(n, n)
     except Exception:
@@ -105,11 +113,42 @@ def icon_page(name):
     return "https://prts.wiki/w/" + urllib.parse.quote(name)
 
 
+def _safe_name(name):
+    """文件名清洗：先按别名表解析、去掉换行，再替换非法字符。
+
+    路径与查找必须走同一个函数，否则 ``icon_path`` 会用一个名字建目录、
+    ``_any_px_file`` 又用另一个名字去找，永远对不上。
+    """
+    return "".join(ch if ch not in '\\/:*?"<>|' else "_"
+                   for ch in _resolve_name(name))
+
+
 def icon_path(paths, name, px=64):
-    safe = "".join(ch if ch not in '\\/:*?"<>|' else "_"
-                   for ch in (name or ""))
     d = os.path.join(paths.data_dir, "icons", "enemy", str(px))
-    return os.path.join(d, "%s.png" % safe)
+    return os.path.join(d, "%s.png" % _safe_name(name))
+
+
+def _icon_roots(paths):
+    """可写目录优先，随后是随包只读目录（exe 版图标在 ``_MEIPASS``）。"""
+    roots = [os.path.join(paths.data_dir, "icons", "enemy")]
+    seed = getattr(paths, "seed_data_dir", None)
+    if seed:
+        p = os.path.join(seed, "icons", "enemy")
+        if p not in roots:
+            roots.append(p)
+    return roots
+
+
+def _any_px_file(paths, name, px):
+    """在可写/只读两种根下找 ``<px>/<name>.png``，返回第一个存在的路径。"""
+    safe = _safe_name(name)
+    if not safe:
+        return ""
+    for base in _icon_roots(paths):
+        p = os.path.join(base, str(px), "%s.png" % safe)
+        if os.path.isfile(p):
+            return p
+    return ""
 
 
 def fetch_icon(name, px=64, timeout=20.0):
@@ -203,36 +242,31 @@ def load_icon(paths, name, px=64):
     没缓存就返回 None，让调用方画占位图；想补图请用 ``load_icon_async``。
     优先读目标尺寸，读不到时用其它已缓存的尺寸（44/64/96/128）就近缩放，
     这样只要有一个尺寸下载成功，所有视图都能显示头像。
+    可写目录没有时会去随包只读目录找（exe 版图标只存在于 ``_MEIPASS``，
+    以前只认可写目录，结果 exe 里所有敌人头像都退化成占位首字）。
     """
     try:
         from PIL import Image
     except ImportError:
         return None
-    p = icon_path(paths, name, px)
-    if os.path.isfile(p):
-        try:
-            return Image.open(p).convert("RGBA")
-        except Exception:
+    p = _any_px_file(paths, name, px)
+    if not p:
+        # 回退到其它尺寸（按与目标尺寸的接近度排序）
+        sizes = []
+        for base in _icon_roots(paths):
             try:
-                os.remove(p)
+                for d in os.listdir(base):
+                    if d.isdigit():
+                        sizes.append(int(d))
             except OSError:
-                pass
-    # 回退到其它尺寸（按与目标尺寸的接近度排序）
-    if px != 64 and os.path.isfile(icon_path(paths, name, 64)):
-        p = icon_path(paths, name, 64)
-    else:
-        base = os.path.dirname(icon_path(paths, name, px))
-        if os.path.isdir(base):
-            sizes = []
-            for d in os.listdir(base):
-                if d.isdigit():
-                    sizes.append(int(d))
-            sizes.sort(key=lambda s: abs(s - px))
-            for s in sizes:
-                cand = icon_path(paths, name, s)
-                if os.path.isfile(cand):
-                    p = cand
-                    break
+                continue
+        sizes.sort(key=lambda s: abs(s - px))
+        for s in sizes:
+            p = _any_px_file(paths, name, s)
+            if p:
+                break
+    if not p:
+        return None
     try:
         im = Image.open(p).convert("RGBA")
     except Exception:
@@ -261,17 +295,18 @@ def load_icon_async(paths, name, px=64, on_done: Optional[Callable] = None,
     会记入负面缓存，后续直接跳过。
     """
     p = icon_path(paths, name, px)
-    if os.path.isfile(p):
-        # 已缓存，直接同步读回（本地 IO 很快）
+    existing = _any_px_file(paths, name, px)
+    if existing:
+        # 已缓存（可能在随包只读目录里），直接同步读回（本地 IO 很快）
         try:
             from PIL import Image
-            im = Image.open(p).convert("RGBA")
+            im = Image.open(existing).convert("RGBA")
             if on_done:
                 on_done(im)
             return
         except Exception:
             try:
-                os.remove(p)
+                os.remove(existing)
             except OSError:
                 pass
     with _lock:

@@ -7,7 +7,7 @@
 ; 虽然能用，但用户找不到缓存目录，卸载时也清不干净。
 
 #define AppName "肥牛妙妙工具"
-#define AppVer "beta2"
+#define AppVer "2.2"
 #define AppExe "肥牛妙妙工具.exe"
 #define AppPub "Surtrsdog"
 #define AppUrl "https://github.com/Surtrsdog/Feiniu_miaomiao_tools"
@@ -28,7 +28,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=F:\mini api\dist
-OutputBaseFilename=肥牛妙妙工具_beta2_安装包
+OutputBaseFilename=肥牛妙妙工具_{#AppVer}_安装包
 SetupIconFile=F:\mini api\.build\app.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
@@ -38,9 +38,9 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 ; beta 版不做签名，写明避免 SmartScreen 误报困惑
-VersionInfoVersion=2.0.0.0
+VersionInfoVersion=2.2.0.0
 VersionInfoProductName={#AppName}
-VersionInfoProductVersion=2.0.0.0
+VersionInfoProductVersion=2.2.0.0
 VersionInfoCompany={#AppPub}
 VersionInfoDescription={#AppName} 安装程序
 

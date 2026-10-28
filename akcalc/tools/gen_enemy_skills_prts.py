@@ -66,22 +66,126 @@ UA = "FeiNiuMiaoMiao/1.0 (akcalc enemy codex; contact via github)"
 #: 敌人页常见命名后缀，按优先级依次尝试
 PAGE_SUFFIXES = ("(敌方)", "", "/敌方", "(敌人)")
 
-_TAG_RE = re.compile(r"<[^>]{0,40}>")
-_TERM_RE = re.compile(r"\{\{术语\|[^|{}]*\|([^{}]*)\}\}")
-_COLOR_RE = re.compile(r"\{\{color\|[^|{}]*\|([^{}]*)\}\}")
+#: 任何 HTML 标签一律删掉。**上界必须足够宽**：PRTS 上带内联样式的
+#: ``<span style="color:#fff;background:red;padding-inline:0.5em;
+#: box-shadow:0 0 5px red;">`` 一个标签就有 84 个字符，旧版写成
+#: ``{0,40}`` 直接漏掉，于是标签原文留在技能描述里显示给用户看
+#: （``enemy_1587_ubbplwq`` 的「封锁区和平治理计划」就是这么脏的）。
+#: 放宽到 300 且不允许跨 ``>``，不会误吞正文里的比较号。
+_TAG_RE = re.compile(r"<[^>]{0,300}>")
 _BR_RE = re.compile(r"<br\s*/?>", re.I)
+#: wiki 内链：``[[结晶]]`` -> ``结晶``；``[[结晶|晶簇]]`` -> ``晶簇``
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]|]{0,60})(?:\|([^\[\]]{0,60}))?\]\]")
+#: HTML 注释 ``<!--…-->`` 一律删掉（PRTS 上用来藏旧数值）
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+#: 落单的竖线：``术语|ba.stun|晕眩``（半截模板残留）取最后一段当可见文本
+_LONE_PIPE_RE = re.compile(
+    r"[^|\s\[\]（）]{0,40}\|(?:[^|\s]{1,40}\|)*([^|\n]{0,60})")
+
+#: 模板 → 显示文本。**逐条登记**，不做「统一取最后一段」的猜测：
+#: 参数个数相同的模板取值位置并不一样（见下面 ``异常效果`` 与
+#: ``变动数值lite``），猜错了界面上就会冒出「内容=」「原因=6」这种原文。
+#:
+#: 值是「取第几个参数」（第一个参数 = 1）。``异常效果|晕眩|免疫``
+#: 在 PRTS 上渲染成「晕眩免疫」，两个都要，所以给 ``[1, 2]``。
+_TPL_ARGSPEC = {
+    # 术语：{{术语|ba.stun|晕眩}} -> 晕眩
+    "术语": [3], "术语/custom": [2, 3],
+    # 颜色：{{color|#FF4F0B|初始模式}} -> 初始模式
+    "color": [3], "font": [2],
+    # 状态：{{异常效果|自缚}} / {{异常效果|晕眩|免疫}} -> 自缚 / 晕眩免疫
+    "异常效果": [2, 3], "特殊机制": [2], "技能类型": [2],
+    # 数值变动：{{变动数值|900%|+}} -> 900%+ ；{{变动数值lite|down|蓝|说明}} -> 说明
+    "变动数值": [2, 3], "变动数值lite": [4], "*": [2, 3], "**": [2, 3],
+    "+": [2, 3],
+    #: popup 的正文在具名参数 ``|内容=…`` 里，按「键名」取值
+    "popup": ["内容"], "Popup": ["内容"], "_Popup": ["内容"],
+    "popup/range": [2], "参阅": [3],
+    #: 修正lite 只有第 2 段是位置参数，其余全是具名（原文=/原因=）
+    "修正lite": [2], "修正": [2],
+    # 纯样式 / 导航 / 资源模板：整段丢掉
+    "Navigator": [], "敌人导航": [], "干员导航": [], "pathnav2": [],
+    "spine": [], "spineId": [], "FULLPAGENAME": [], "#Widget:Mojibake": [],
+    "mdi": [], "敌人头像": [], "材料消耗": [],
+}
+#: 没登记的模板统一走这条：保留最后一个不含 ``=`` 的参数；全带 ``=``
+#: 就整段丢掉。模板名允许 ``#`` 开头（``{{#Widget:…}}``）与 ``/`` 结尾。
+_TPL_ANY_RE = re.compile(r"\{\{([^{}|\n]{1,24}?)\s*(\|[^{}\n]*?)?\}\}")
+_TPL_ARG_SPLIT = re.compile(r"\|")
+
+
+def _tpl_render(name: str, body: str) -> str:
+    """把一个模板替换成它在 PRTS 页面上的可见文本。
+
+    ``_TPL_ARGSPEC`` 里既可以写位置序号（int，1 起），也可以写具名参数的
+    键名（str）——``{{popup|内容=…}}`` 的正文只在 ``内容`` 这个具名参数里，
+    按位置取会拿到空串。
+    """
+    name = (name or "").strip()
+    parts = _TPL_ARG_SPLIT.split(body or "")
+    spec = _TPL_ARGSPEC.get(name)
+    if spec is not None:
+        if not spec:
+            return ""
+        out = []
+        for key in spec:
+            if isinstance(key, str):
+                for seg in parts:
+                    if seg.startswith(key + "="):
+                        out.append(seg[len(key) + 1:])
+                        break
+            elif key - 1 < len(parts):
+                seg = parts[key - 1]
+                if seg and "=" not in seg:
+                    out.append(seg)
+        return "".join(out)
+    # 未登记：取最后一个「不带 = 的参数」
+    for seg in reversed(parts):
+        if seg and "=" not in seg:
+            return seg
+    return ""
 
 
 def _clean(text: str) -> str:
-    """去掉 wiki 标记，留纯文本。"""
-    t = _BR_RE.sub("\n", str(text or ""))
-    t = _TERM_RE.sub(r"\1", t)          # {{术语|ba.buffres|抵抗}} -> 抵抗
-    t = _COLOR_RE.sub(r"\1", t)         # {{color|#f00|狂暴}}   -> 狂暴
+    """去掉 wiki 标记，留纯文本。
+
+    两个曾经把界面弄脏的坑：
+
+    1. **顺序**。旧版先把 ``{{`` / ``}}`` 抹掉再跑正则，
+       ``{{术语|ba.stun|晕眩}}`` 被拆成 ``术语|ba.stun|晕眩}}``，正则再也
+       匹配不上，最后界面上出现「……可触发：术语」。
+    2. **取值位置**。不同模板的显示文本不在同一个参数上，统一「取最后
+       一段」会把 ``{{popup|内容=包含以下装置：…}}`` 变成 ``内容=…``、
+       把 ``{{修正lite|※|原文=·|原因=6}}`` 变成 ``原因=6``。
+
+    所以现在按模板名逐条登记（:data:`_TPL_ARGSPEC`），先渲染成可见文本，
+    最后才清落单的花括号与竖线。
+    """
+    t = str(text or "")
+    t = _HTML_COMMENT_RE.sub("", t)
+    #: 先渲染模板、后转 ``<br>``：``_TPL_ANY_RE`` 不跨行，一旦提前把
+    #: ``<br>`` 变成 ``\n``，正文里带换行的模板（``{{popup|内容=…<br>…}}``）
+    #: 就整段匹配不上，最后只清出个 ``内容=成功0次`` 留在界面上。
+    for _ in range(8):
+        new = _TPL_ANY_RE.sub(lambda m: _tpl_render(m.group(1), m.group(2)), t)
+        if new == t:
+            break
+        t = new
+    t = _BR_RE.sub("\n", t)
     t = _TAG_RE.sub("", t)
+    t = _WIKILINK_RE.sub(lambda m: (m.group(2) or m.group(1)), t)
     t = t.replace("'''", "").replace("''", "")
+    # 命名空间链接（``[[:分类:xxx|显示]]``）：内链正则要求不带冒号，
+    # 这类漏网的再兜一层——只留 ``|`` 后面的显示文本，没有就整段删。
+    t = re.sub(r"\[\[:[^\[\]|]{0,80}(?:\|([^\[\]]{0,80}))?\]\]",
+               lambda m: m.group(1) or "", t)
+    t = t.replace("[[", "").replace("]]", "")
     # 没配对的模板残留（PRTS 上有 `{{污染` 这种断开的写法）：
     # 直接把花括号本身抹掉，比留个 `{{` 在界面上强。
     t = t.replace("{{", "").replace("}}", "")
+    # 落单的竖线（半截模板被抹掉后常见）：`术语|ba.stun|晕眩` -> `晕眩`
+    if "|" in t:
+        t = _LONE_PIPE_RE.sub(lambda m: m.group(1) or "", t)
     return t.strip()
 
 
@@ -227,8 +331,15 @@ def parse_skills(wikitext: str) -> list:
     if not block:
         return []
     found = {}
-    for m in re.finditer(
-            r"\|\s*技能(\d+)(初始|消耗|效果|名称)?\s*=\s*([^\n|]*)", block):
+    #: 值部分**不能**用 ``[^\n|]*`` 拦：技能效果正文里带模板，
+    #: ``{{术语|ba.stun|晕眩}}``、``{{color|#f00|红}}`` 里全是竖线，一拦就
+    #: 只剩 ``{{术语``，后面的正文整段丢失 —— 这正是「可触发：术语」的来源。
+    #: 真正的字段边界是「下一行以 ``|`` 开头且形如 ``|技能N…=``」，所以
+    #: 值一直吃到下一个同类字段之前（用 lookahead 断句，允许跨行）。
+    _FIELD = r"\|\s*技能(\d+)(初始|消耗|效果|名称)?\s*="
+    pat = re.compile(
+        _FIELD + r"([\s\S]*?)(?=" + _FIELD + r"|\n\s*\}\}|\n\s*\|[^\n=]{1,30}=|\Z)")
+    for m in pat.finditer(block):
         idx = int(m.group(1))
         field = m.group(2) or "名称"
         val = m.group(3).strip()

@@ -17,6 +17,7 @@ from ..core import compare as CMP
 from ..core import curves as CV
 from ..core import damage as DMG
 from ..core import skills as SK
+from ..core import talents as TAL
 from ..core.models import EnemyStats, Operator
 from .widgets import (ACCENT, ACCENT_SOFT, BG, BG_INPUT, BG_PANEL, BORDER,
                       CARD, CARD_HEAD, ComboBox, DIVIDER, FG, FG_DIM,
@@ -37,6 +38,10 @@ class DamagePanel(ttk.Frame):
         self._chart: Optional[CV.CurveChart] = None
         #: 当前干员是不是医疗分支（他们不产生伤害，面板要给出提示而不是假 DPS）
         self._healer: bool = False
+        #: 模组选择 -> 模组条目（用于把模组属性计入面板）
+        self._module_options: Dict[str, dict] = {}
+        #: 召唤物选择 -> 召唤物条目（用于把召唤物输出计入面板）
+        self._summon_options: Dict[str, dict] = {}
 
         self._build()
         self._rebuild_skill_choices()
@@ -122,6 +127,45 @@ class DamagePanel(ttk.Frame):
         self.var_pot = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2, text="满潜能", variable=self.var_pot,
                         command=self.recompute).pack(side="left", padx=(6, 0))
+
+        # 模组选择：模组会加攻击 / 攻速等面板属性，必须能选上并计入。
+        # 之前完全没这个入口，选了干员也拿不到模组属性（用户反馈「模组加的
+        # 数据也没有模组选择」）。
+        row3 = ttk.Frame(b, style="App.TFrame")
+        row3.pack(fill="x", pady=(3, 0))
+        ttk.Label(row3, text="模组", style="Card.TLabel").pack(side="left")
+        self.var_module = tk.StringVar(value="无模组")
+        self.cmb_module = ComboBox(row3, textvariable=self.var_module, width=17,
+                                       state="readonly", values=["无模组"])
+        self.cmb_module.pack(side="left", padx=(3, 4))
+        self.var_module_lv = tk.StringVar(value="3")
+        self.cmb_module_lv = ComboBox(row3, textvariable=self.var_module_lv,
+                                          width=3, state="readonly",
+                                          values=["1", "2", "3"])
+        self.cmb_module_lv.pack(side="left")
+        self.cmb_module.bind("<<ComboboxSelected>>", lambda e: self.recompute())
+        self.cmb_module_lv.bind("<<ComboboxSelected>>", lambda e: self.recompute())
+
+        # 召唤物：召唤师/战术家/工匠的输出主体其实在召唤物身上
+        # （令的「弦惊」823 攻、麦哲伦龙腾.A 753 攻、凯尔希 Mon3tr 1402 攻）。
+        # 只算干员本体的话这些干员的 DPS 会严重偏低。
+        row4 = ttk.Frame(b, style="App.TFrame")
+        row4.pack(fill="x", pady=(3, 0))
+        self.lbl_summon = ttk.Label(row4, text="召唤物", style="Card.TLabel")
+        self.lbl_summon.pack(side="left")
+        self.var_summon = tk.StringVar(value="不计入")
+        self.cmb_summon = ComboBox(row4, textvariable=self.var_summon, width=15,
+                                   state="readonly", values=["不计入"])
+        self.cmb_summon.pack(side="left", padx=(3, 4))
+        self.var_summon_cnt = tk.StringVar(value="1")
+        self.cmb_summon_cnt = ComboBox(row4, textvariable=self.var_summon_cnt,
+                                       width=3, state="readonly",
+                                       values=["1", "2", "3", "4", "5"])
+        self.cmb_summon_cnt.pack(side="left")
+        self.cmb_summon.bind("<<ComboboxSelected>>",
+                             lambda e: self.recompute())
+        self.cmb_summon_cnt.bind("<<ComboboxSelected>>",
+                                 lambda e: self.recompute())
 
         # ---------------- 技能
         sec_sk = SectionFrame(left, "技能（可选）")
@@ -466,7 +510,31 @@ class DamagePanel(ttk.Frame):
         else:
             self.lbl_skill.config(text="")
         self._sync_dtype_from_skill()
+        self._sync_summon_from_skill()
         self.recompute()
+
+    def _sync_summon_from_skill(self) -> None:
+        """技能换了就跟着换召唤物。
+
+        召唤师的每个技能召唤出来的东西通常不同（令 S1 清平 / S2 逍遥 /
+        S3 弦惊，麦哲伦 S1 龙腾.F / S2 龙腾.L / S3 龙腾.A），官方数据里
+        技能条目带 ``overrideTokenKey`` 精确指明是哪一个。用户选技能后
+        还得自己去下面的下拉里翻对应的召唤物，很容易漏算或选错。
+        """
+        op = self.operator
+        lib = getattr(self.app, "summon_lib", None)
+        if op is None or lib is None or not self._skill:
+            return
+        sid = getattr(self._skill, "skill_id", "") or ""
+        idx = int(getattr(self._skill, "index", 0) or 0)
+        tok = lib.summon_for_skill(op.char_id, sid, idx)
+        if tok is None:
+            return
+        # 只在该召唤物确实出现在下拉里时才切（避免把「不计入」覆盖掉）
+        for label, d in getattr(self, "_summon_options", {}).items():
+            if d.get("token_id") == tok.token_id:
+                self.var_summon.set(label)
+                return
 
     def _sync_dtype_from_skill(self) -> None:
         """技能描述写明伤害类型时以技能为准（望的三技能是法术）。
@@ -523,6 +591,8 @@ class DamagePanel(ttk.Frame):
         elites = sorted(op.phases.keys())
         self.cmb_elite.config(values=[str(e) for e in elites])
         self.var_elite.set(str(max(elites)) if elites else "0")
+        self._rebuild_module_choices()
+        self._rebuild_summon_choices()
         self._rebuild_skill_choices()
         self._on_elite_change()
 
@@ -596,7 +666,113 @@ class DamagePanel(ttk.Frame):
             atk += op.trust_bonus.get("atk", 0.0)
         if self.var_pot.get():
             atk += op.potential_bonus.get("atk", 0.0)
+        atk += self._module_attrs().get("atk", 0.0)
         return st, atk
+
+    def _rebuild_module_choices(self) -> None:
+        """按当前干员刷新模组下拉。"""
+        op = self.operator
+        choices = ["无模组"]
+        self._module_options: Dict[str, dict] = {}
+        if op is not None:
+            lib = getattr(self.app, "module_lib", None)
+            mods = lib.mods_of(op.char_id) if lib is not None else []
+            for m in mods:
+                # 基础证章（INITIAL）没有属性加成，选了也没意义，不展示
+                if m.get("type") == "基础证章":
+                    continue
+                label = "%s（%s）" % (m.get("name", m.get("id", "")), m.get("type", "模组"))
+                choices.append(label)
+                self._module_options[label] = m
+        self.cmb_module.config(values=choices)
+        self.var_module.set("无模组")
+
+    def _rebuild_summon_choices(self) -> None:
+        """按当前干员刷新召唤物下拉。
+
+        只列出**攻击型**召唤物（攻击力高于占位值 100 的）：
+        夹子、医疗探机、电池这类纯装置不产生伤害，列出来只会误导。
+        """
+        op = self.operator
+        choices = ["不计入"]
+        self._summon_options: Dict[str, dict] = {}
+        if op is not None:
+            lib = getattr(self.app, "summon_lib", None)
+            cands = lib.summons_of(op.char_id) if lib is not None else []
+            for d in cands:
+                if not d.get("offensive"):
+                    continue
+                label = "%s（攻 %.0f / %.2fs）" % (
+                    d.get("name", d.get("token_id", "")),
+                    float(d.get("atk") or 0.0),
+                    float(d.get("interval") or 1.0))
+                choices.append(label)
+                self._summon_options[label] = d
+        self.cmb_summon.config(values=choices)
+        # 有且只有一个攻击型召唤物时默认帮用户选上——那才是这个干员的
+        # 实际输出主体，需要用户自己去找下拉反而容易漏算。
+        if len(choices) == 2:
+            self.var_summon.set(choices[1])
+        else:
+            self.var_summon.set("不计入")
+        try:
+            self.cmb_summon_cnt.config(state="readonly" if len(choices) > 1
+                                       else "disabled")
+        except tk.TclError:
+            pass
+
+    def _summon_input(self) -> Optional[DMG.SummonInput]:
+        """当前选中的召唤物 -> 计算输入（未选返回 None）。"""
+        label = self.var_summon.get()
+        d = self._summon_options.get(label)
+        if not d:
+            return None
+        try:
+            atk = float(d.get("atk") or 0.0)
+            interval = float(d.get("interval") or 1.0)
+        except (TypeError, ValueError):
+            return None
+        if atk <= 0:
+            return None
+        try:
+            count = max(1, int(self.var_summon_cnt.get()))
+        except ValueError:
+            count = 1
+        return DMG.SummonInput(
+            name=str(d.get("name") or "召唤物"),
+            attack=atk,
+            interval=interval if interval > 0 else 1.0,
+            damage_type=d.get("damage_type") or C.DMG_PHYSICAL,
+            count=count,
+        )
+
+    def _module_attrs(self) -> Dict[str, float]:
+        """当前选中模组的等级属性（atk / attack_speed 等）。"""
+        out: Dict[str, float] = {}
+        op = self.operator
+        label = self.var_module.get()
+        m = self._module_options.get(label)
+        if op is None or m is None:
+            return out
+        lib = getattr(self.app, "module_lib", None)
+        if lib is None:
+            return out
+        try:
+            lv = int(self.var_module_lv.get())
+        except ValueError:
+            lv = 3
+        for ph in lib.phases_of(m.get("id", "")):
+            if int(ph.get("level", 0)) != lv:
+                continue
+            for a in ph.get("attrs", []):
+                k = a.get("key")
+                if k in ("atk", "attack_speed"):
+                    try:
+                        out[k] = float(a.get("value"))
+                    except (TypeError, ValueError):
+                        pass
+            break
+        return out
 
     def _f(self, entry, default: float) -> float:
         """从 LabeledEntry 读浮点数。"""
@@ -608,12 +784,15 @@ class DamagePanel(ttk.Frame):
     def _make_input(self, atk: float, dtype: str, mult: float, flat: float,
                     pen_p: float, pen_f: float, boost: float, hits: int,
                     target_def: float, final_scaler: float = 1.0,
-                    def_down: float = 0.0) -> DMG.DamageInput:
+                    def_down: float = 0.0,
+                    res_pen_flat: float = 0.0,
+                    res_pen_percent: float = 0.0) -> DMG.DamageInput:
         return DMG.DamageInput(
             attack=atk, damage_type=dtype,
             attack_multiplier=mult, flat_attack_bonus=flat,
             target_defense=target_def,
             def_pen_flat=pen_f, def_pen_percent=pen_p,
+            res_pen_flat=res_pen_flat, res_pen_percent=res_pen_percent,
             damage_boost=boost, hit_count=max(1, hits),
             final_scaler=final_scaler,
             def_down_percent=max(0.0, min(1.0, def_down)),
@@ -713,17 +892,28 @@ class DamagePanel(ttk.Frame):
             self.lbl_curve.config(text="对比模式：请在下方选择 2~5 位干员")
             return None, []
 
-        # 公共条件：穿透 / 增伤 / 攻速 / 目标抗性 / 伤害类型都用当前加拐设置
+        # 公共条件：穿透 / 增伤 / 攻速 / 目标抗性 / 伤害类型都用当前加拐设置。
+        # 物穿 / 法穿分流，避免混伤槽位把法穿错用到物理分量上（或反之）。
         buf = self._read_buffs()
-        pen_p = buf.res_percent()
-        pen_f = buf.res_flat()
+        pen_p = buf.res_percent()          # 百分比穿透（物法通用）
+        pen_f = buf.res_flat()             # 固定穿透（物理）
         boost = buf.fragile()
         hits = max(1, int(self._f(self.e_hits, 1.0)))
         speed = buf.get("aspd", 100.0) or 100.0
         dtype = self.var_dtype.get()
         target_def = self._defense_for_buffs(dtype)
-        common = dict(damage_type=dtype, pen_percent=pen_p, pen_flat=pen_f,
-                      boost=boost, hits=hits, target_def=target_def, speed=speed)
+        common = dict(
+            damage_type=dtype,
+            pen_percent=pen_p,
+            pen_flat=pen_f,
+            res_pen_flat=buf.get("res_down", 0.0),
+            res_pen_percent=pen_p,
+            def_down_percent=buf.get("def_down", 0.0) / 100.0,
+            final_scaler=buf.final_scaler(),
+            boost=boost, hits=hits,
+            target_def=target_def, speed=speed,
+            target_res=self._f(self.e_res, 0.0),
+            target_eres=self._f(self.e_eres, 0.0))
 
         triples = []
         break_lines = []
@@ -832,16 +1022,37 @@ class DamagePanel(ttk.Frame):
         buf = self._read_buffs()
         mult = buf.atk_multiplier()
         flat = buf.flat_atk()
-        pen_p = buf.res_percent()
-        pen_f = buf.res_flat()
         boost = buf.fragile()
         hits = max(1, int(self._f(self.e_hits, 1.0)))
         speed = buf.get("aspd", 100.0)
         if speed <= 0:
             speed = 100.0
+        # 模组会加攻速（如 +5 攻速点），必须和 buff 攻速、技能攻速一起进间隔
+        module_spd = self._module_attrs().get("attack_speed", 0.0)
         dtype = self.var_dtype.get()
-        # 按伤害类型选抗性；减防只作用于物理防御（法伤吃法抗，不受减防影响）
-        target_def = self._defense_for_buffs(dtype)
+
+        # 天赋被动（法术穿透 / 物理穿透），按当前精英阶段取已解锁档位。
+        try:
+            elite = int(self.var_elite.get())
+        except ValueError:
+            elite = 0
+        tp = TAL.passives_of_at(self.operator, elite)
+
+        # 物理 / 法术穿透分流：物理分量只吃 def_pen_*，法术分量只吃 res_pen_*，
+        # 两者互不串扰（这正是「混伤要按类型分别计算」的前提）。
+        # 「百分比穿透」(res_pen) 按 PRTS 同时作用于防御与法抗，故两边都加；
+        # 「减防」(def_down) 是物理专属，单独走 def_down_percent，不能混进穿透。
+        phys_pen_flat = buf.get("def_flat", 0.0) + tp.def_pen_flat
+        phys_pen_pct = min(0.99, buf.res_percent() + tp.def_pen_percent)
+        mag_pen_flat = buf.get("res_down", 0.0) + tp.res_pen_flat
+        mag_pen_pct = min(0.99, buf.res_percent() + tp.res_pen_percent)
+        def_down = buf.get("def_down", 0.0) / 100.0
+        final_scaler = buf.final_scaler()
+
+        # 三项抗性原值（混伤用）；单类型下按类型取其一
+        target_def = self._f(self.e_def, 0.0)
+        target_res = self._f(self.e_res, 0.0)
+        target_eres = self._f(self.e_eres, 0.0)
 
         lv = self._skill_value()
         sk_interval_delta = lv.interval_delta if lv else 0.0
@@ -849,62 +1060,281 @@ class DamagePanel(ttk.Frame):
 
         def interval_of(speed_bonus: float, delta: float) -> float:
             iv = DMG.effective_attack_interval(base_interval + delta,
-                                               speed + speed_bonus)
+                                               speed + module_spd + speed_bonus)
             return iv if iv > 0 else 0.01
 
         base_iv = interval_of(0.0, 0.0)
         sk_iv = interval_of(sk_speed, sk_interval_delta)
         interval = sk_iv if lv else base_iv
 
-        base_inp = self._make_input(atk, dtype, mult, flat, pen_p, pen_f,
-                                    boost, hits, target_def,
-                                    final_scaler=buf.final_scaler(),
-                                    def_down=buf.get("def_down", 0.0) / 100.0)
-        sk_inp = self._with_skill(base_inp, lv)
-        inp = sk_inp if lv else base_inp
+        mixed = bool(lv and getattr(lv, "magic_scale", 0.0) > 0)
 
-        res = DMG.compute_damage(inp)
-        dps = DMG.compute_dps(res.final_damage, interval, inp.hit_count)
-        dph = res.final_damage * inp.hit_count
-        break_line = (DMG.break_defense_threshold(res.base_damage)
-                      if dtype == C.DMG_PHYSICAL else 0.0)
+        # ---------------- 召唤物（与本体分开算，最后相加）
+        # 召唤物有自己的攻击力/攻击间隔/伤害类型，必须独立结算后再叠加；
+        # 塞进本体公式会让间隔与穿透互相串（令本体 1.6s、弦惊 1.5s）。
+        sum_inp = self._summon_input()
+        sum_base = None      # 0 防 0 抗基准
+        sum_live = None      # 当前目标
+        if sum_inp is not None:
+            # 穿透：召唤物不吃干员天赋被动（那是干员自己的能力），
+            # 但队友给的减防/减抗是作用于目标的，召唤物同样受益。
+            sum_inp.def_pen_flat = buf.get("def_flat", 0.0)
+            sum_inp.def_pen_percent = min(0.99, buf.res_percent())
+            sum_inp.res_pen_flat = buf.get("res_down", 0.0)
+            sum_inp.res_pen_percent = min(0.99, buf.res_percent())
+            sum_base = DMG.compute_summon(
+                sum_inp, 0.0, 0.0, 0.0, damage_boost=boost,
+                final_scaler=final_scaler)
+            sum_live = DMG.compute_summon(
+                sum_inp, target_def, target_res, target_eres,
+                damage_boost=boost, final_scaler=final_scaler)
 
-        rows = [
-            ("单次伤害", "%.2f" % res.final_damage),
-            ("DPH（每次攻击总伤害）", "%.2f" % dph),
-            ("DPS", "%.1f" % dps),
-            ("伤害类型", C.DMG_TYPE_LABELS.get(dtype, dtype)),
-            ("基本伤害 A", "%.2f" % res.base_damage),
-            ("保底 5%A", "%.2f%s" % (res.min_damage,
-                                    "（已触发）" if res.floored else "")),
-            ("有效抗性", "%.2f" % res.effective_resist),
-            ("实际攻击间隔", "%.3f s" % interval),
-        ]
-        if getattr(self, "_healer", False):
-            # 医疗干员不造成伤害：面板上没有「治疗」档，别让他们显示一个
-            # 看着像伤害的 DPS。这里的数值仍然按当前类型算出来，
-            # 但明确提示这是「治疗量估算」。
-            rows[2] = ("DPS", "—（医疗干员）")
+        # ---------------- 混伤：按类型分别计算再加总
+        if mixed:
+            op = self.operator
+            phys_dtype = DT.guess_damage_type(op.profession, op.sub_profession) \
+                if op else C.DMG_PHYSICAL
+            if phys_dtype in (C.DMG_HEAL, "", None):
+                phys_dtype = C.DMG_PHYSICAL
+            stops = bool(getattr(lv, "stops_attack", False))
+            # 停止普攻的技能（露托「强磁防卫」）：atk 增益是防御向的，
+            # 法术周期伤相对面板攻击力，不能再乘一遍攻击增益。官方提取里
+            # 这类技能的倍率就是 1.0（apply_official 因「默认值不覆盖」而
+            # 保留了正则读到的旧值，这里显式回退到 1.0，避免重复乘算）。
+            skill_mult = 1.0 if stops else lv.atk_multiplier
+            skill_flat = lv.flat_atk
+            skill_hits = max(1, lv.hit_count)
+            phys_scale = getattr(lv, "dmg_scale", 1.0) or 1.0
+            mag_scale = lv.magic_scale
+            total_hits = max(1, hits * skill_hits)
+
+            def make_components() -> List[DMG.DamageComponent]:
+                comps: List[DMG.DamageComponent] = []
+                if not stops:
+                    # 物理分量：普攻分支类型（要塞/重射手等是物理；驭械术师
+                    # 这类分支普攻本就是法术，则两条都归法术，仍正确加总）。
+                    comps.append(DMG.DamageComponent(
+                        damage_type=phys_dtype,
+                        attack_multiplier=mult * skill_mult * phys_scale,
+                        flat_attack_bonus=flat + skill_flat,
+                        hit_count=total_hits,
+                        def_pen_flat=phys_pen_flat,
+                        def_pen_percent=phys_pen_pct,
+                        def_down_percent=def_down,
+                        res_pen_flat=mag_pen_flat,
+                        res_pen_percent=mag_pen_pct,
+                        label="物理分量"))
+                # 法术分量：magic_scale 相对技能期攻击力
+                comps.append(DMG.DamageComponent(
+                    damage_type=C.DMG_MAGICAL,
+                    attack_multiplier=mult * skill_mult * mag_scale,
+                    flat_attack_bonus=flat + skill_flat,
+                    hit_count=total_hits,
+                    def_pen_flat=phys_pen_flat,
+                    def_pen_percent=phys_pen_pct,
+                    res_pen_flat=mag_pen_flat,
+                    res_pen_percent=mag_pen_pct,
+                    label="法术分量"))
+                return comps
+
+            comps = make_components()
+            # 0 抗性基准：上方面板 DPH/DPS 用「零物抗 / 零法抗」口径
+            base_m = DMG.MultiTypeInput(
+                attack=atk, components=comps,
+                target_defense=0.0, target_res=0.0, target_eres=0.0,
+                damage_boost=boost, final_scaler=final_scaler)
+            base_res = DMG.compute_multi(base_m)
+            # 当前目标抗性：计算过程逐分量展开；图表固定另一轴用
+            live_m = DMG.MultiTypeInput(
+                attack=atk, components=comps,
+                target_defense=target_def, target_res=target_res,
+                target_eres=target_eres,
+                damage_boost=boost, final_scaler=final_scaler)
+            live_res = DMG.compute_multi(live_m)
+
+            single = base_res.final_damage
+            dph = base_res.total_damage
+            dps = DMG.multi_dps(base_res, interval)
+            per_dph = base_res.per_type()
+            per_dps = {t: v / interval if interval > 0 else 0.0
+                       for t, v in per_dph.items()}
+            type_label = "混伤（%s）" % "、".join(
+                C.DMG_TYPE_LABELS.get(t, t) for t in per_dph)
+
+            rows = [
+                ("单次伤害", "%.2f" % single),
+                ("DPH（每次攻击总伤害）", "%.2f" % dph),
+                ("DPS", "%.1f" % dps),
+                ("伤害类型", type_label),
+            ]
+            for t in (C.DMG_PHYSICAL, C.DMG_MAGICAL, C.DMG_ELEMENTAL, C.DMG_TRUE):
+                if t in per_dph:
+                    nm = C.DMG_TYPE_LABELS.get(t, t)
+                    rows.append(("%s DPH" % nm, "%.2f" % per_dph[t]))
+                    rows.append(("%s DPS" % nm, "%.1f" % per_dps[t]))
+            rows.append(("实际攻击间隔", "%.3f s" % interval))
+            if total_hits > 1:
+                rows.append(("连击次数", str(total_hits)))
+            if sum_base is not None and sum_inp is not None:
+                s_dps = sum_base.total_damage / sum_inp.interval \
+                    if sum_inp.interval > 0 else 0.0
+                rows.append(("召唤物 %s 单次" % sum_inp.name,
+                             "%.2f" % sum_base.final_damage))
+                rows.append(("召唤物 %s DPS" % sum_inp.name, "%.1f" % s_dps))
+                rows.append(("本体+召唤物 DPH",
+                             "%.2f" % (dph + sum_base.total_damage)))
+                rows.append(("本体+召唤物 DPS", "%.1f" % (dps + s_dps)))
+            if lv:
+                rows.append(("技能", "%s %s" % (self._skill.name,
+                                                self.var_skill_lv.get())))
+
+            steps = [
+                "上方面板 DPH/DPS 为 0 防御 / 0 法抗基准；"
+                "下面按当前目标（DEF %g / RES %g）逐分量展开。"
+                % (target_def, target_res),
+            ]
+            for r in live_res.results:
+                steps.append("【%s】" % C.DMG_TYPE_LABELS.get(r.damage_type,
+                                                              r.damage_type))
+                steps.extend(r.steps)
+            if sum_live is not None and sum_inp is not None:
+                steps.append("【召唤物 %s】攻击 %.0f / 间隔 %.2fs / %s"
+                             % (sum_inp.name, sum_inp.attack, sum_inp.interval,
+                                C.DMG_TYPE_LABELS.get(sum_inp.damage_type,
+                                                      sum_inp.damage_type)))
+                steps.extend(sum_live.steps)
+                steps.append("召唤物与干员本体是两条独立攻击流，"
+                             "各自算完再相加（攻击力/间隔都不同）。")
             self._set_metrics(rows)
-            res.steps.insert(0, "【提示】%s 是医疗干员，不造成伤害；"
-                                "下列数值可当作治疗量参考，"
-                                "如需按输出计算请手动切换伤害类型。"
-                             % self.operator.name)
-            self.result.set_steps(res.steps)
-            # 图表也换掉标题，避免误导
-            self.lbl_curve.config(text="医疗干员：默认不展示输出曲线，"
-                                       "可手动切换伤害类型后查看")
-            self._chart = None
-            self.chart.draw(None)
-            return
-        if inp.hit_count > 1:
-            rows.append(("连击次数", str(inp.hit_count)))
-        if break_line:
-            rows.append(("破甲线", "%.1f" % break_line))
-        if lv:
-            rows.append(("技能", "%s %s" % (self._skill.name, self.var_skill_lv.get())))
-        self._set_metrics(rows)
-        self.result.set_steps(res.steps)
+            self.result.set_steps(steps)
+
+            # 破甲线只对物理分量有意义
+            break_line = 0.0
+            if not stops and phys_dtype == C.DMG_PHYSICAL:
+                phys_a = atk * (mult * skill_mult * phys_scale) + flat + skill_flat
+                break_line = DMG.break_defense_threshold(phys_a)
+            live_input_for_chart = live_m
+            chart_plain = None
+            res = live_res
+        else:
+            # ---------------- 单类型
+            tgt = self._resist_for(dtype)
+            base0_inp = self._make_input(
+                atk, dtype, mult, flat, phys_pen_pct, phys_pen_flat,
+                boost, hits, 0.0,
+                final_scaler=final_scaler, def_down=def_down,
+                res_pen_flat=mag_pen_flat, res_pen_percent=mag_pen_pct)
+            base0_inp = self._with_skill(base0_inp, lv)
+            base0_res = DMG.compute_damage(base0_inp)
+
+            base_inp = self._make_input(
+                atk, dtype, mult, flat, phys_pen_pct, phys_pen_flat,
+                boost, hits, tgt,
+                final_scaler=final_scaler, def_down=def_down,
+                res_pen_flat=mag_pen_flat, res_pen_percent=mag_pen_pct)
+            sk_inp = self._with_skill(base_inp, lv)
+            inp = sk_inp if lv else base_inp
+
+            res = DMG.compute_damage(inp)
+            own_single = base0_res.final_damage
+            own_dph = base0_res.total_damage
+            own_dps = DMG.compute_dps(base0_res.final_damage, interval,
+                                      base0_res.hit_count)
+            # 召唤物按零抗基准并入单次/DPH/DPS（与本体同一口径）。
+            # 但本体那几行要保留：召唤物占比可以高到 85%（令 S3），
+            # 只给一个合并后的数就分不清伤害是谁打的。
+            s_dph = 0.0
+            s_dps = 0.0
+            has_sum = sum_base is not None and sum_inp is not None
+            if has_sum:
+                s_dph = sum_base.total_damage
+                s_dps = (s_dph / sum_inp.interval
+                         if sum_inp.interval > 0 else 0.0)
+            single = own_single + (sum_base.final_damage if has_sum else 0.0)
+            dph = own_dph + s_dph
+            dps = own_dps + s_dps
+            break_line = (DMG.break_defense_threshold(res.base_damage)
+                          if dtype == C.DMG_PHYSICAL else 0.0)
+
+            rows = [
+                ("单次伤害", "%.2f" % single),
+                ("DPH（每次攻击总伤害）", "%.2f" % dph),
+                ("DPS", "%.1f" % dps),
+                ("伤害类型", C.DMG_TYPE_LABELS.get(dtype, dtype)),
+                ("基本伤害 A", "%.2f" % res.base_damage),
+                ("保底 5%A", "%.2f%s" % (res.min_damage,
+                                        "（已触发）" if res.floored else "")),
+                ("有效抗性", "%.2f" % res.effective_resist),
+                ("实际攻击间隔", "%.3f s" % interval),
+            ]
+            if has_sum:
+                # 上面三行是「本体 + 召唤物」合计，这里把两者拆开给全
+                rows.append(("本体单次", "%.2f" % own_single))
+                rows.append(("本体 DPS", "%.1f" % own_dps))
+                rows.append(("召唤物 %s 单次" % sum_inp.name,
+                             "%.2f" % sum_base.final_damage))
+                rows.append(("召唤物 %s DPS" % sum_inp.name, "%.1f" % s_dps))
+                rows.append(("召唤物占比",
+                             "%.0f%%" % (100.0 * s_dps / dps if dps > 0 else 0.0)))
+            if getattr(self, "_healer", False) and not (
+                    sum_base is not None and sum_inp is not None):
+                # 医疗干员不造成伤害：面板上没有「治疗」档，别让他们显示一个
+                # 看着像伤害的 DPS。这里的数值仍然按当前类型算出来，
+                # 但明确提示这是「治疗量估算」。
+                #
+                # 例外：带攻击型召唤物的医疗干员（凯尔希的 Mon3tr 攻 1402）。
+                # 本体确实只治疗，但召唤物是真的在打输出——这条分支以前
+                # 直接把 DPS 抹成「—」，Mon3tr 那 700 DPS 就一起消失了。
+                rows[2] = ("DPS", "—（医疗干员）")
+                self._set_metrics(rows)
+                res.steps.insert(0, "【提示】%s 是医疗干员，不造成伤害；"
+                                    "下列数值可当作治疗量参考，"
+                                    "如需按输出计算请手动切换伤害类型。"
+                                 % self.operator.name)
+                self.result.set_steps(res.steps)
+                # 图表也换掉标题，避免误导
+                self.lbl_curve.config(text="医疗干员：默认不展示输出曲线，"
+                                           "可手动切换伤害类型后查看")
+                self._chart = None
+                self.chart.draw(None)
+                return
+            if inp.hit_count > 1:
+                rows.append(("连击次数", str(inp.hit_count)))
+            if break_line:
+                rows.append(("破甲线", "%.1f" % break_line))
+            # 穿透生效时把它摆到面板上，否则玩家只看得到一个有效抗性数字，
+            # 心里没法确认天赋的固定穿透到底算没算。
+            pen_note = getattr(res, "penetration_note", "")
+            if pen_note:
+                rows.append(("穿透", pen_note))
+            # 面板前两行是 0 抗基准，改目标抗性它们不会动。补一行「按当前目标
+            # 抗性实算」，否则玩家调法抗看不到任何数字变化，会以为穿透没生效。
+            live_val = getattr(res, "final_damage", 0.0)
+            if (target_def or target_res or target_eres) and live_val:
+                rows.append(("按目标实算",
+                             "%.2f（DEF %g / RES %g）"
+                             % (live_val, target_def, target_res)))
+            if lv:
+                rows.append(("技能", "%s %s" % (self._skill.name, self.var_skill_lv.get())))
+            self._set_metrics(rows)
+            steps = list(res.steps)
+            if target_def or target_res or target_eres:
+                steps = ["上方面板 DPH/DPS 为 0 防御 / 0 法抗基准；"
+                         "下面按当前目标（DEF %g / RES %g / 元素 %g）展开。"
+                         % (target_def, target_res, target_eres)] + steps
+            if sum_live is not None and sum_inp is not None:
+                steps = steps + [
+                    "【召唤物 %s】攻击 %.0f / 间隔 %.2fs / %s"
+                    % (sum_inp.name, sum_inp.attack, sum_inp.interval,
+                       C.DMG_TYPE_LABELS.get(sum_inp.damage_type,
+                                             sum_inp.damage_type)),
+                ] + list(sum_live.steps) + [
+                    "召唤物与干员本体是两条独立攻击流，各自算完再相加。",
+                ]
+            self.result.set_steps(steps)
+            live_input_for_chart = inp
+            chart_plain = (base_inp, base_iv)
+            target_def = tgt
 
         # ---- 曲线
         kind = CV.DEFAULT_KIND
@@ -935,10 +1365,47 @@ class DamagePanel(ttk.Frame):
         if self.lbl_cmp_table.winfo_ismapped():
             self.lbl_cmp_table.pack_forget()
 
-        chart = CV.build_chart(kind, inp, interval, x_max=x_max,
-                               break_line=break_line)
+        if mixed:
+            chart = CV.build_mixed_chart(kind, live_input_for_chart, interval,
+                                         x_max=x_max, break_line=break_line)
+            # 召唤物独立成线：混伤图里本体已经按类型分开画了，
+            # 召唤物属性口径不同，只能单独一条 + 一条合计线。
+            if sum_inp is not None:
+                _sum_xs = CV.summon_x_values(kind, chart)
+                if _sum_xs:
+                    chart.series.append(CV.summon_series(
+                        kind, sum_inp, _sum_xs,
+                        target_def=target_def, target_res=target_res,
+                        target_eres=target_eres))
+                    _total = next((s for s in chart.series
+                                   if s.name == "总量"), None)
+                    if _total is not None:
+                        chart.series.append(CV.summon_combo_series(
+                            kind, sum_inp, _sum_xs, _total.points,
+                            target_def=target_def, target_res=target_res,
+                            target_eres=target_eres))
+            if kind in ("dmg_res", "dps_res"):
+                cur_x = target_res
+            elif kind == "dmg_elem":
+                cur_x = target_eres
+            else:
+                cur_x = target_def
+            self._chart = chart
+            self.chart.draw(chart, current_x=cur_x)
+            note = chart.desc
+            if lv:
+                note += "　｜　已叠加技能「%s %s」（混伤逐分量）" % (
+                    self._skill.name, self.var_skill_lv.get())
+            if sum_inp is not None:
+                note += "　｜　召唤物「%s」独立成线" % sum_inp.name
+            self.lbl_curve.config(text=note)
+            return
+
+        chart = CV.build_chart(kind, live_input_for_chart, interval,
+                               x_max=x_max, break_line=break_line)
         # 叠加「常态」对照（技能开启时才有意义）
         if lv:
+            base_inp, base_iv = chart_plain
             plain_chart = CV.build_chart(kind, base_inp, base_iv, x_max=x_max)
             chart.series[0] = CV.CurveSeries(
                 name="技能中", points=chart.series[0].points, color="#e74c3c")
@@ -946,8 +1413,27 @@ class DamagePanel(ttk.Frame):
                 name="常态", points=plain_chart.series[0].points,
                 color="#4ea1f7"))
 
+        # 召唤物曲线：在本体筛选（保底/单条）之前插进去，
+        # 否则「不显示保底线」那一步会把召唤物线一起裁掉。
+        if sum_inp is not None:
+            _sum_xs = CV.summon_x_values(kind, chart)
+            if _sum_xs:
+                _main = chart.series[0] if chart.series else None
+                chart.series.append(CV.summon_series(
+                    kind, sum_inp, _sum_xs,
+                    target_def=target_def, target_res=target_res,
+                    target_eres=target_eres))
+                if _main is not None:
+                    chart.series.append(CV.summon_combo_series(
+                        kind, sum_inp, _sum_xs, _main.points,
+                        target_def=target_def, target_res=target_res,
+                        target_eres=target_eres))
+
         if not self.var_overlay.get():
-            chart.series = [s_ for s_ in chart.series if s_.note != "保底"]
+            chart.series = [s_ for s_ in chart.series
+                            if s_.note != "保底"
+                            and not s_.name.startswith("召唤物·")
+                            and s_.name != "本体 + 召唤物"]
             chart.series = chart.series[:1]
 
         self._chart = chart
@@ -956,6 +1442,10 @@ class DamagePanel(ttk.Frame):
         if lv:
             note += "　｜　已叠加技能「%s %s」与常态对照" % (
                 self._skill.name, self.var_skill_lv.get())
+        if sum_inp is not None:
+            note += "　｜　召唤物「%s」%s" % (
+                sum_inp.name,
+                "已叠加" if self.var_overlay.get() else "已计入上方数值")
         self.lbl_curve.config(text=note)
 
 

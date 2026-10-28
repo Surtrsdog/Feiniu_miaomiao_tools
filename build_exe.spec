@@ -21,7 +21,17 @@ ICON = os.path.join(ROOT, '.build', 'app.ico')
 seed = []
 if os.path.isdir(CACHE):
     for name in ('operators.json', 'enemy_database.json', 'uniequip_table.json',
-                 'battle_equip_table.json', 'module_stats.json'):
+                 'battle_equip_table.json', 'module_stats.json',
+                 # 召唤物数值（28 个会输出的 token）。缺了它「召唤物」下拉
+                 # 会只剩「不计入」，点「重新下载数据」用户也未必知道要下。
+                 'summon_stats.json',
+                 # 敌人档案（abilityList / description）。这是「敌人图鉴
+                 # 没有天赋与能力描写」唯一的源头：enemy_database.json
+                 # 里只有数值和 prefabKey，一句人话都没有。
+                 # paths.seed_if_needed() 会把它复制到可写目录，但前提是
+                 # 它先得在 _MEIPASS 里存在——漏在这里，复制会静默跳过，
+                 # exe 版图鉴的天赋/能力卡就整片空白，源码跑却完全正常。
+                 'enemy_handbook_table.json'):
         p = os.path.join(CACHE, name)
         if os.path.isfile(p):
             seed.append((p, os.path.join('data', 'cache')))
@@ -29,22 +39,44 @@ if os.path.isdir(CACHE):
     if os.path.isdir(levels):
         seed.append((levels, os.path.join('data', 'cache', 'levels')))
 
-# ---- 随包数据表：关卡目录（3439 关）+ 敌人中文名
+# ---- 随包数据表：关卡目录（4521 关）+ 敌人中文名
 DATA = os.path.join(ROOT, 'akcalc', 'data')
 for name in ('catalog.json', 'enemy_names.json', 'skill_table.json',
              'skill_table_full.json', 'enemy_icon_alias.json',
              'codex_fields.json',
              # 敌人技能名 -> prefabKey（PRTS 抓取）。图鉴「技能」卡靠它
              # 把中文技能名和解包代码对上，漏了覆盖率会掉一半。
-             'enemy_skills_prts.json'):
+             'enemy_skills_prts.json',
+             # 集成战略（肉鸽）关卡索引。官方 stage_table.json 里一条肉鸽
+             # 关卡都没有，这 1033 条全靠这张表；缺了「集成战略」分类
+             # 会整个变空，所以必须随包。
+             'roguelike_topic_table.json'):
     p = os.path.join(DATA, name)
     if os.path.isfile(p):
         seed.append((p, os.path.join('akcalc', 'data')))
+
+# ---- 图标：干员/敌人头像
+# 只带「最高一档」，其余尺寸由 operator_icons / enemy_icons 在运行时
+# 就近缩放（这两个模块本来就支持按任意已有尺寸缩放）。
+# 刻意不带敌人 44/64/128 三档：四档合计 132MB，而 96 档向下能覆盖
+# 44/64/16，向上 128 只放 1.33 倍，肉眼看不出差别。
+# 干员只有 128 一档（461 张，15MB），必须带——不带的话选择器里全是
+# 名字缩写，用户明确投诉过这一点。
+for sub in (('icons', 'operator', '128'), ('icons', 'enemy', '96')):
+    src_dir = os.path.join(DATA, *sub)
+    if os.path.isdir(src_dir):
+        seed.append((src_dir,
+                     os.path.join('akcalc', 'data', *sub)))
 
 # ---- 窗口图标 png：exe 图标由 icon= 指定，窗口/任务栏小图标用这张 png
 _ICON_PNG = os.path.join(ROOT, '.build', 'app_256.png')
 if os.path.isfile(_ICON_PNG):
     seed.append((_ICON_PNG, '.'))
+
+# ---- 版本资源：让 exe 属性里能看到版本号（否则右键属性一片空白）
+_VERSION_FILE = os.path.join(ROOT, '.build', 'winver.txt')
+if not os.path.isfile(_VERSION_FILE):
+    _VERSION_FILE = None
 
 # ---- 硬检查：catalog.json 必须存在，否则寻路面板会在 exe 里显示
 # 「关卡目录尚未载入」。宁可打包时报错，也不要发出一个坏 exe。
@@ -79,9 +111,28 @@ hiddenimports = [
     'akcalc.core.routes',
     'akcalc.core.skills',
     'akcalc.core.skilldata',
+    'akcalc.core.summons',
+    'akcalc.core.talents',
     'akcalc.core.enemy_class',
     'akcalc.core.operator_icons',
     'akcalc.core.operator_modules',
+    # ---- 以下这批曾经漏在清单外，打出来的 exe 一点就 ModuleNotFoundError。
+    # 光看源码「import 得好好的」查不出来：它们大多是**函数内延迟导入**
+    # （为了缩短启动时间、也为了 tkinter 未就绪时不炸），PyInstaller 的
+    # 静态分析看不到，只能在这里手工点名。
+    'akcalc.core.annotations',
+    'akcalc.core.enemy_codex',
+    'akcalc.core.enemy_icons',
+    'akcalc.core.enemy_skills',
+    'akcalc.core.extra_mechanics',       # 图鉴「代码实现」卡（纯延迟导入）
+    'akcalc.core.handbook',              # 敌人档案（纯延迟导入）
+    'akcalc.core.mechanisms',            # 特殊地块/机关参数
+    'akcalc.core.sandbox',               # 沙盘推演核心
+    'akcalc.core.sandbox_track',         # 粗轴 / Deployment
+    'akcalc.core.settings',
+    'akcalc.core.single_instance',
+    'akcalc.core.skill_instructions',    # 技能指令栏（纯延迟导入）
+    'akcalc.core.update_check',
     'akcalc.ui',
     'akcalc.ui.app',
     'akcalc.ui.damage_panel',
@@ -93,6 +144,13 @@ hiddenimports = [
     'akcalc.ui.path_panel',
     'akcalc.ui.code_viewer',
     'akcalc.ui.widgets',
+    'akcalc.ui.annotation_card',
+    'akcalc.ui.data_index',
+    'akcalc.ui.monster_codex',           # 图鉴弹窗（纯延迟导入）
+    'akcalc.ui.sandbox_panel',           # 沙盘面板（纯延迟导入）
+    'akcalc.ui.settings_dialog',
+    'akcalc.ui.skill_render',
+    'akcalc.ui.track_canvas',
     'tkinter',
     'tkinter.ttk',
     'tkinter.font',
@@ -128,7 +186,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='FeiNiuMiaoMiao',
+    name='肥牛妙妙工具',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -142,4 +200,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=ICON if os.path.isfile(ICON) else None,
+    version=_VERSION_FILE,
 )

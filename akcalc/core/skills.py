@@ -42,6 +42,14 @@ class SkillLevel:
     interval_delta: float = 0.0     # 攻击间隔修正（秒，负数为缩短）
     interval_abs: float = 0.0       # 保留字段（历史上曾用于绝对间隔，现恒为 0）
     dmg_scale: float = 1.0          # 单次伤害缩放（「造成相当于攻击力 x% 的伤害」）
+    #: 混伤：技能在普攻之外**额外**造成的法术伤害倍率，**相对技能期间的面板
+    #: 攻击力**（含攻击力提升，例如「攻击力+110% 后每次攻击额外造成相当于
+    #: 攻击力 100% 的法术伤害」的 magic_scale 就是 1.0，最终法术分量 =
+    #: 面板攻击力 x atk_multiplier x magic_scale）。0 表示没有法术分量。
+    magic_scale: float = 0.0
+    #: 技能期间是否停止普攻（如重岳「强磁防卫」：停止攻击、只放法术范围伤）。
+    #: 为真时物理分量为 0，只有 magic_scale 描述的那部分范围法术伤害。
+    stops_attack: bool = False
     hit_count: int = 1              # 连射次数
     duration: float = 0.0           # 持续时间
     cost: float = 0.0               # 技力消耗
@@ -168,6 +176,12 @@ def apply_official(lv: SkillLevel, entry: dict, lv_index: int) -> SkillLevel:
         lv.cost = off["cost"]
     if off.get("initial"):
         lv.initial = off["initial"]
+    # 混伤分量：官方检测到法术分量/停止普攻就覆盖（0 也算「给了结论」，
+    # 因为默认就是 0/False，这里不需要「非默认才写」的判断）。
+    if "magic_scale" in off:
+        lv.magic_scale = off["magic_scale"]
+    if "stops_attack" in off:
+        lv.stops_attack = off["stops_attack"]
     lv.extra = list(dict.fromkeys(list(lv.extra) + list(off.get("extra") or [])))
     return lv
 
@@ -374,6 +388,10 @@ def skill_summary(sk: Skill, label: str) -> str:
         bits.append("%d 连击" % lv.hit_count)
     if lv.dmg_scale != 1.0:
         bits.append("单发 x%.2f" % lv.dmg_scale)
+    if getattr(lv, "magic_scale", 0.0):
+        bits.append("法术分量 x%.2f" % lv.magic_scale)
+    if getattr(lv, "stops_attack", False):
+        bits.append("停止普攻")
     has_effect = bool(bits)          # 到这里 bits 里全是真正的输出加成
     if lv.duration:
         bits.append("持续 %gs" % lv.duration)

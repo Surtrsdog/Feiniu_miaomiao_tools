@@ -156,6 +156,35 @@ def _bb_get(blackboard, key: str):
     return None
 
 
+# summary() 里给参数配的中文标签，避免在界面上直接抛 raw key
+_PARAM_CN = {
+    "tile": "目标格",
+    "mode": "模式",
+    "interval": "间隔秒",
+    "damage": "每跳伤害",
+    "atk": "攻击倍率",
+    "atk_scale": "攻击倍率",
+    "attack_speed": "攻速",
+    "move_speed": "移速",
+    "duration": "持续秒",
+    "prob": "概率",
+    "interval_max": "最长间隔",
+    "interval_min": "最短间隔",
+    "special": "特殊",
+    "def": "防御",
+    "cd_min": "最短冷却",
+    "cd_max": "最长冷却",
+    "base_force_level": "力度等级",
+    "HP_RECOVERY_PER_SEC_BY_MAX_HP_RATIO": "每秒回血(按上限)",
+    "respawn_time": "重生秒",
+    "value": "数值",
+    "cooldown": "冷却秒",
+    "attackspeed": "攻速",
+    "dynamic": "动态",
+    "falldown_stack_count": "下陷层数",
+}
+
+
 class Mechanism:
     """地图上的一个机关实例。"""
 
@@ -184,15 +213,22 @@ class Mechanism:
         if self.pair_key:
             s += "（组 %s）" % self.pair_key
         if self.params:
+            # 先按「界面最想先看到的」顺序取已知键，再补其它键
+            order = ("tile", "mode", "interval", "damage", "atk", "atk_scale",
+                     "attack_speed", "move_speed", "duration", "prob", "def",
+                     "base_force_level", "HP_RECOVERY_PER_SEC_BY_MAX_HP_RATIO")
+            keys = [k for k in order if k in self.params]
+            keys += [k for k in self.params if k not in order]
             kv = []
-            for k in ("tile", "mode", "interval", "damage", "atk_scale",
-                      "attack_speed", "move_speed", "duration", "prob"):
-                if k in self.params:
-                    kv.append("%s=%s" % (k, self.params[k]))
-                    if len(kv) >= 3:
-                        break
+            for k in keys:
+                v = self.params[k]
+                if isinstance(v, float) and abs(v - round(v)) < 1e-9:
+                    v = int(round(v))
+                kv.append("%s %s" % (_PARAM_CN.get(k, k), v))
+                if len(kv) >= 4:
+                    break
             if kv:
-                s += "　" + " ".join(kv)
+                s += "　" + " · ".join(kv)
         return s
 
     def __repr__(self) -> str:
@@ -206,18 +242,41 @@ def extract(game_map) -> List[Mechanism]:
     blackboard），``game_map.tiles`` 已经过矩阵翻转把 tileKey 放到
     (row, col) 上。这里以 ``tiles`` 的坐标为准确位置，用 tile_defs
     里同 tileKey 的 blackboard 补参数。
+
+    关键：**同一 tileKey 可以有多条 def，且参数不同**。
+    例如 4-4 的 ``tile_infection`` 在 tiles 里出现两次（下标 33/56），
+    原实现把同 key 的 blackboard 收进池子，发现池子不止一条就放弃
+    （bb=None → params={}），于是悬停只剩「感染地面」四个字、
+    看不到 damage 180 / duration 300 / atk_scale 0.5 / attack_speed 50。
+    现在改为按每格自己的 ``tile.def_index`` 精确定位那一条 def。
     """
     if game_map is None:
         return []
-    # 先按 tileKey 收集一份 blackboard 池（同一 tileKey 的参数通常相同）
-    bb_pool: Dict[str, List[dict]] = {}
-    for td in (getattr(game_map, "tile_defs", None) or []):
-        if not isinstance(td, dict):
-            continue
-        key = td.get("tileKey") or ""
-        bb = td.get("blackboard")
-        if key and bb:
-            bb_pool.setdefault(key, []).append(bb)
+    defs = getattr(game_map, "tile_defs", None) or []
+
+    def _bb_for(tile) -> dict:
+        """取该格自己的 blackboard；取不到再退回同 key 的唯一一份。"""
+        # 注意：def_index 可以是 0，**不能**写成 `x or -1`，
+        # 否则下标 0 会被当成「没有下标」丢掉。
+        raw_idx = getattr(tile, "def_index", -1)
+        idx = -1 if raw_idx is None else int(raw_idx)
+        if 0 <= idx < len(defs):
+            td = defs[idx]
+            if isinstance(td, dict):
+                bb = td.get("blackboard")
+                if bb:
+                    return bb
+        key = getattr(tile, "tile_key", "") or ""
+        cache = {}
+        for td in defs:
+            if isinstance(td, dict) and (td.get("tileKey") or "") == key:
+                bb = td.get("blackboard")
+                if bb:
+                    cache[id(bb)] = bb
+        # 只有在唯一时才能安全回退，否则宁可空着也不张冠李戴
+        if len(cache) == 1:
+            return next(iter(cache.values()))
+        return {}
 
     out: List[Mechanism] = []
     seen = set()
@@ -230,13 +289,22 @@ def extract(game_map) -> List[Mechanism]:
             if pos in seen:
                 continue
             seen.add(pos)
-            pool = bb_pool.get(key) or [None]
-            bb = pool[0] if len(pool) == 1 else None
+            bb = _bb_for(tile)
+            # 全量收录 blackboard 键值，不再用白名单。
+            # 白名单曾只留 13 个键，而解包里机关实际用过 40+ 种
+            # （tile_defbreak 的 def、tile_bigforce 的 base_force_level、
+            #  tile_healing 的 HP_RECOVERY_PER_SEC_BY_MAX_HP_RATIO…），
+            # 导致 6029 个本应带参数的机关格里 3619 格退化成空。
             params: Dict[str, object] = {}
-            for k in ("tile", "mode", "interval", "damage", "atk_scale",
-                      "attack_speed", "move_speed", "duration", "prob",
-                      "interval_max", "interval_min", "special"):
-                v = _bb_get(bb, k)
+            for item in (bb or []):
+                if not isinstance(item, dict):
+                    continue
+                k = item.get("key")
+                if not k:
+                    continue
+                v = item.get("value")
+                if v is None:
+                    v = item.get("valueStr")
                 if v is not None:
                     params[k] = v
             pair = ""
