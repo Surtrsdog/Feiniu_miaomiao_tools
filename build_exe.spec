@@ -31,7 +31,8 @@ if os.path.isdir(CACHE):
                  # paths.seed_if_needed() 会把它复制到可写目录，但前提是
                  # 它先得在 _MEIPASS 里存在——漏在这里，复制会静默跳过，
                  # exe 版图鉴的天赋/能力卡就整片空白，源码跑却完全正常。
-                 'enemy_handbook_table.json'):
+                 'enemy_handbook_table.json',
+                  'char_ranges.json'):
         p = os.path.join(CACHE, name)
         if os.path.isfile(p):
             seed.append((p, os.path.join('data', 'cache')))
@@ -50,7 +51,41 @@ for name in ('catalog.json', 'enemy_names.json', 'skill_table.json',
              # 集成战略（肉鸽）关卡索引。官方 stage_table.json 里一条肉鸽
              # 关卡都没有，这 1033 条全靠这张表；缺了「集成战略」分类
              # 会整个变空，所以必须随包。
-             'roguelike_topic_table.json'):
+             'roguelike_topic_table.json',
+             # 敌人抬手（攻击前摇）。数据来自解包 bakemuzzledata——
+             # 2109 个文件 89MB，构建期解析成 0.22MB 的这张表。
+             # 缺了它图鉴的「抬手」卡不显示，且不会有任何报错，
+             # 属于典型静默降级，必须随包。
+             'enemy_attack_timing.json',
+             # 干员抬手（攻击前摇）+ 登场 + 技能抬手。同一套 bake，
+             # 465 个文件 72MB，构建期解析成 45KB 的这张表。
+             # 同样属于漏了就静默降级（干员页抬手整块不显示），必须随包。
+             'operator_attack_timing.json',
+             # ---- 批次 B 新增数据文件 ----
+             # 攻击范围形状表（B4 §7，73 个 id，18.7KB）。
+             # 沙盘 _load_char_ranges 按 __file__ 相对路径读
+             # akcalc/data/range_table.json；漏了它所有干员范围退回 3×3。
+             'range_table.json',
+             # 装置目录（批次 C S0，207 种装置，75KB）。
+             # maps.py _token_catalog() 按 __file__ 相对路径读
+             # akcalc/data/token_catalog.json；漏了它所有装置降级 D 类，
+             # 寻路不再被装置阻挡（好梦在何方的石箱墙直接消失）。
+             'token_catalog.json',
+             # 技能判定机制（图鉴「机制」卡 + MCP skill_mechanics_*）。
+             # 由 buff_template_data.json（8681 模板 / 28MB）提炼成 0.37MB。
+             # 漏了它图鉴机制卡显示「数据不可用」，MCP 三个工具报错。
+             'skill_mechanics.json',
+             # 全库出怪时间轴（MCP stage_timeline / stage_field_at）。
+             # 由 akcalc/tools/gen_stage_waves.py 从 4010 个关卡文件
+             # （waves/fragments/actions 三层 preDelay 累加，走同一个
+             # parse_timeline）抽取成 4.8MB / 4007 关 / 13.1 万出怪批次。
+             # 漏了它两个工具直接报「没有出怪数据」，少人课题没法做；
+             # 与 core/paths.py 的 seed 白名单是两份，必须成对维护。
+             'stage_waves.json',
+             # 战斗逻辑数据（IL2CPP 逆向提取，802KB）。
+             # MCP battle_target_logic / battle_blackboard_dict /
+             # battle_talent_triggers / battle_fps_info 的数据源。
+             'battle_logic.json'):
     p = os.path.join(DATA, name)
     if os.path.isfile(p):
         seed.append((p, os.path.join('akcalc', 'data')))
@@ -124,6 +159,7 @@ hiddenimports = [
     'akcalc.core.enemy_codex',
     'akcalc.core.enemy_icons',
     'akcalc.core.enemy_skills',
+    'akcalc.core.enemy_timing',
     'akcalc.core.extra_mechanics',       # 图鉴「代码实现」卡（纯延迟导入）
     'akcalc.core.handbook',              # 敌人档案（纯延迟导入）
     'akcalc.core.mechanisms',            # 特殊地块/机关参数
@@ -151,6 +187,28 @@ hiddenimports = [
     'akcalc.ui.settings_dialog',
     'akcalc.ui.skill_render',
     'akcalc.ui.track_canvas',
+    # ---- MCP 服务端（供外接 AI 读取数据）。
+    # 整个包只在 app.main() 里被 `--mcp` 分支延迟导入，静态分析看不到。
+    # 少一个都会让打包版 `肥牛妙妙工具.exe --mcp` 直接 ModuleNotFoundError，
+    # 而源码模式完全正常 —— 这类问题只有打包后才知道。
+    'akcalc.mcp',
+    'akcalc.mcp.server',
+    'akcalc.mcp.common',
+    'akcalc.mcp.client_config',
+    'akcalc.mcp.tool_enemies',
+    'akcalc.mcp.tool_operators',
+    'akcalc.mcp.tool_maps',
+    'akcalc.mcp.tool_routes',
+    # ---- 批次 B 新增模块（延迟导入，静态分析看不到） ----
+    # 7 个战斗计算工具（tool_battle.py）。--mcp 模式下 tools() 延迟
+    # 导入它们，漏了打包版 MCP 只有 19 个工具且战斗计算全部 404。
+    'akcalc.mcp.tool_battle',
+    # 攻击范围模块（B4 §7）。sandbox._load_char_ranges() 函数内延迟
+    # 导入，漏了所有干员范围退回 3×3 兜底。
+    'akcalc.core.ranges',
+    # DP 经济系统（B2 §5）。sandbox.__init__ 函数内延迟导入，
+    # 漏了沙盘部署直接崩（deploy_check 调 self.dp.can_afford）。
+    'akcalc.core.dp',
     'tkinter',
     'tkinter.ttk',
     'tkinter.font',
@@ -172,7 +230,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[os.path.join(ROOT, '.build', 'rt_hook.py')],
     excludes=['numpy', 'pandas', 'matplotlib', 'scipy', 'pytest',
               'setuptools', 'pip', 'test', 'unittest', 'pydoc_data'],
     noarchive=False,

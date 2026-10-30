@@ -746,7 +746,10 @@ class ScrollFrame(tk.Frame):
         return None
 
     def scroll_wheel(self, event) -> None:
-        """按事件滚动本容器。"""
+        """按事件滚动本容器。
+
+        方向：滚轮向下滑 → 页面向下（看到下方内容），与 Windows 标准一致。
+        """
         try:
             if not self.canvas.winfo_ismapped():
                 return
@@ -754,11 +757,13 @@ class ScrollFrame(tk.Frame):
             return
         d = int(getattr(event, "delta", 0) or 0)
         if d == 0:
-            # X11 风格（Button-4/5）走 delta 为 0 的分支
+            # X11 风格（Button-4/5）
             num = int(getattr(event, "num", 0) or 0)
-            step = -1 if num == 4 else (1 if num == 5 else 0)
+            step = 1 if num == 5 else (-1 if num == 4 else 0)
         else:
-            self._wheel_acc += -d
+            # Windows: delta>0 = 向上滚, delta<0 = 向下滚
+            # 向下滚要看到下方内容 → yview_scroll(+1)
+            self._wheel_acc += d
             step = 0
             while self._wheel_acc >= 120:
                 self._wheel_acc -= 120

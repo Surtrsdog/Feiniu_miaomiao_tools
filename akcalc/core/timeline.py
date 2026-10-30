@@ -454,7 +454,8 @@ class Timeline:
     def groups(self, hostile_only: bool = False,
                effective: bool = False,
                hidden_group: str = "",
-               fold_random: bool = False) -> List["SpawnGroup"]:
+               fold_random: bool = False,
+               exclude_branch: bool = True) -> List["SpawnGroup"]:
         """把出怪事件合并成 PRTS 风格的逐条列表（按出场顺序）。
 
         同一批出怪（相同 wave/fragment/action/route，count>1 的多只）
@@ -481,6 +482,8 @@ class Timeline:
                   else list(self.events))
         for e in source:
             if hostile_only and e.harmless:
+                continue
+            if exclude_branch and getattr(e, "branch", ""):
                 continue
             key = (e.wave_index, e.fragment_index, e.action_index,
                    e.enemy_id, e.route_index)
@@ -685,7 +688,9 @@ def fill_names(timeline: Timeline, lookup) -> Timeline:
 
 def positions_at(timeline: "Timeline", seconds: float,
                  analyses, game_map, speed: float = 1.0,
-                 rich: bool = False):
+                 rich: bool = False,
+                 hostile_only: bool = False,
+                 fold_random: bool = False):
     """推算 seconds 时刻各敌人所在格。
 
     返回 [(row, col, 标签, 颜色索引)]：
@@ -695,6 +700,12 @@ def positions_at(timeline: "Timeline", seconds: float,
 
     ``rich=True`` 时每项改为字典，额外带 enemy_id / 攻击移速等，
     供地图上的出怪点悬停与点击详情使用。
+
+    ``hostile_only=True`` 时跳过 ``harmless`` 单位（鸭爵/高普尼克/流泪小子
+    这类无威胁的随机出没单位），不画进地图。
+
+    ``fold_random=True`` 时把同一 ``randomSpawnGroupKey`` 的候选包折叠成
+    一个代表——随机出怪不会全部同时出现，只择一，所以不应该全部画。
 
     罚站为何单独处理
     ----------------
@@ -722,7 +733,17 @@ def positions_at(timeline: "Timeline", seconds: float,
     if not timeline or not analyses or not game_map:
         return out
     by_idx = {a.route_index: a for a in analyses}
-    for e in timeline.events:
+    # 筛选事件：撇除无害单位 / 折叠随机候选包
+    if fold_random:
+        evs = timeline.fold_random_packs()
+    else:
+        evs = timeline.events
+    if hostile_only:
+        evs = [e for e in evs if not getattr(e, "harmless", False)]
+    # 排除分支出怪（侵入式调用）：这些是装置/陷阱触发的条件出怪，
+    # 不属于波次正常出怪，不应出现在地图动画里。
+    evs = [e for e in evs if not getattr(e, "branch", "")]
+    for e in evs:
         if e.time > seconds:
             continue
         a = by_idx.get(e.route_index)

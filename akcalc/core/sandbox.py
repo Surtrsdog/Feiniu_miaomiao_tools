@@ -51,7 +51,7 @@ class OperatorPiece:
 
     __slots__ = ("row", "col", "op_id", "name", "profession", "facing",
                  "range_cells", "uid", "is_ranged", "block_count",
-                 "can_block_fly", "ground", "cost")
+                 "can_block_fly", "ground", "cost", "range_id")
 
     def __init__(self, row: int, col: int, op_id: str = "",
                  name: str = "", profession: str = "", facing: str = "RIGHT"):
@@ -64,6 +64,8 @@ class OperatorPiece:
         self.facing = facing or "RIGHT"
         #: 选中时算好的攻击范围格集合（不选中时为 None，省内存）
         self.range_cells: Optional[Set[Coord]] = None
+        #: B4 §7: 基础范围 id（如 "3-1"），从 character_table 取
+        self.range_id: Optional[str] = None
         #: 对应 ``sandbox_track.Deployment.uid``，撤退时靠它回写粗轴
         self.uid = 0
         #: 远程位（高台）
@@ -129,6 +131,9 @@ class Sandbox:
         self.spawn_wait: Dict[str, float] = {}
         #: 按位置索引的干员棋子
         self.operators: Dict[Coord, OperatorPiece] = {}
+        #: 最近一次 :meth:`deploy` 失败的原因（成功时清空）。
+        #: 界面用它显示真实原因，避免把所有失败都说成「已经有干员了」。
+        self.last_deploy_error: str = ""
         #: 被踢掉的敌人，键是 `_event_key()` 的返回值
         self.kicked: Set[str] = set()
         #: [(event_key, start_s, end_s, mult)] —— 减速区间
@@ -136,17 +141,51 @@ class Sandbox:
         #: 路线的基准分析（无箱子时）。放箱子后用它做「续算」的参照。
         self.base_analyses: List[RT.RouteAnalysis] = list(analyses or [])
         self.analyses: List[RT.RouteAnalysis] = list(analyses or [])
+        #: 按 route_index 索引的分析结果，避免 analysis_for 每次线性扫描。
+        #: 必须**立刻**用构造参数里的 analyses 填好：加载关卡时走的是
+        #: ``Sandbox(gm, timeline, analyses)`` 这条路，不会经过
+        #: :meth:`reanalyze`，以前这里留空就导致 analysis_for() 永远返回
+        #: None -> pose_at() 返回 None -> 场上一只敌人都画不出来。
+        self._by_route: Dict[int, RT.RouteAnalysis] = {
+            int(getattr(ra, "route_index", -1)): ra
+            for ra in self.analyses if ra is not None}
         #: 粗轴：部署 / 撤退 / 开技能的历史记录，与 operators 共用
         #: ``Deployment`` 对象，撤退时回写 ``retreat_time``。
         self.track: CoarseTrack = CoarseTrack()
-        #: 技能回转模拟器（只算 SP，不模拟技能效果）
+        #: 技能回转模拟器（只算 SP，不模拟技能效果）。
+        #: 全局默认（attack_interval=1.0），用于无 op_id 或查不到的降级。
         self.skill_sim: SkillSim = SkillSim(1.0)
+        #: 按 ``op_id`` 缓存的技能回转模拟器——每个干员用真实的
+        #: ``attack_interval`` 初始化，修复 89.4% 干员速率偏差。
+        self._op_skill_sims: Dict[str, SkillSim] = {}
+        #: 干员攻击间隔缓存：op_id -> float。懒加载自 operators.json。
+        self._op_attack_interval: Dict[str, float] = {}
         #: 撤销 / 重做历史栈（UI 按钮 + Ctrl+Z / Ctrl+Y）。
         self._undo_stack: List[dict] = []
         self._redo_stack: List[dict] = []
-        #: 阻挡分配缓存：同一时刻反复问 pose_at 时只算一次。
-        self._plan_cache_time: Optional[float] = None
+        #: 阻挡分配缓存：同一配置反复问 pose_at 时只算一次。
+        self._plan_cache_sig: Optional[tuple] = None
         self._plan_cache: Dict[str, tuple] = {}
+        #: 逐敌人移速缓存：enemy_id -> base_speed（B批次接线用）。
+        self._speed_table: Dict[str, float] = {}
+        #: 按 ``(route_index, round(move_speed, 4))`` 缓存的路线分析
+        #: （B3 §5.7 逐敌人移速）。``analysis_for`` 从这里取，
+        #: 避免同一条路线对不同速度的敌人重复算。
+        self._speed_cache: Dict[Tuple[int, float], "RT.RouteAnalysis"] = {}
+        # B4 §7: 加载干员范围 id 缓存（char_id → {elite: rangeId}）
+        self._load_char_ranges()
+        # B2 §5: 部署费用经济系统
+        opts = getattr(game_map, "options", None) or {}
+        from .dp import DPEconomy, RedeployPenalty
+        self.dp = DPEconomy(
+            initial=float(opts.get("initialCost", 10)),
+            cap=float(opts.get("maxCost", 99)),
+            interval=float(opts.get("costIncreaseTime", 1.0)),
+        )
+        self._redeploy_penalty = RedeployPenalty()
+        self.character_limit = int(opts.get("characterLimit", 8))
+        self.max_life = int(opts.get("maxLifePoint", 3))
+        self._life = int(self.max_life)
         if not self.analyses:
             self.recompute()
             # ⚠ 现算出来的这批结果同时也是「基准」：``box_check`` 拿
@@ -172,20 +211,76 @@ class Sandbox:
             getattr(ev, "action_index", -1),
         )
 
+    def enemy_move_speed(self, event) -> float:
+        """返回指定敌人的基础移速（格/秒）。
+
+        优先从 ``_speed_table``（enemy_id → speed）取值；
+        查不到时降级为 1.0。``_speed_table`` 由调用方
+        （如 ``recompute_with_speeds`` 或外部初始化）填充。
+        """
+        eid = getattr(event, "enemy_id", "") or ""
+        if eid in self._speed_table:
+            return self._speed_table[eid]
+        return 1.0
+
+    def _speed_key(self, event) -> Tuple[int, float]:
+        """返回 ``(route_index, round(speed, 4))`` 用于查速度缓存。"""
+        idx = int(getattr(event, "route_index", -1))
+        sp = round(float(self.enemy_move_speed(event)), 4)
+        return (idx, sp)
+
+    def _load_char_ranges(self) -> None:
+        """B4 §7: 启动时加载干员范围 id 缓存 + 范围形状表。"""
+        try:
+            from . import ranges as _R
+            import os
+            base = os.path.join(os.path.dirname(__file__), "..", "data")
+            base = os.path.normpath(base)
+            # 加载范围形状表（73 个 id）
+            rt = os.path.join(base, "range_table.json")
+            if os.path.isfile(rt):
+                _R.load_range_table(rt)
+            # 加载干员 → rangeId 映射（461 个干员）
+            cr = os.path.join(base, "cache", "char_ranges.json")
+            if os.path.isfile(cr):
+                _R.load_char_ranges(cr)
+        except Exception:
+            pass
+
+    def _lookup_range_id(self, op_id: str) -> Optional[str]:
+        """B4 §7：查干员的基础范围 id。
+
+        优先从 ``character_table`` 缓存（``ranges.load_char_ranges``）取；
+        查不到返回 ``None``（UI 退回 3×3 兜底）。
+        """
+        if not op_id:
+            return None
+        try:
+            from . import ranges as _R
+            return _R.get_char_range_id(op_id)
+        except Exception:
+            return None
+
     def events(self) -> list:
         """本关所有出怪事件（按时间排序）。
 
         ``fold_random=True`` 时先把随机候选包折叠成一个代表，见
         :attr:`fold_random`。
+
+        分支出怪（``branches[]``，侵入式调用）已排除——它们是装置/陷阱
+        触发的条件出怪，不属于波次正常出怪。
         """
         if self.timeline is None:
             return []
         if self.fold_random:
             try:
-                return list(self.timeline.fold_random_packs())
+                evs = list(self.timeline.fold_random_packs())
             except AttributeError:
-                pass
-        return list(getattr(self.timeline, "events", []) or [])
+                evs = list(getattr(self.timeline, "events", []) or [])
+        else:
+            evs = list(getattr(self.timeline, "events", []) or [])
+        # 排除分支出怪
+        return [e for e in evs if not getattr(e, "branch", "")]
 
     def live_events(self) -> list:
         """没被踢掉的出怪事件。"""
@@ -320,7 +415,11 @@ class Sandbox:
     # ------------------------------------------------------------ 重算
 
     def recompute(self) -> List[RT.RouteAnalysis]:
-        """重算所有路线。只有箱子参与，干员不参与。"""
+        """重算所有路线（全局默认速度 1.0）。只有箱子参与，干员不参与。
+
+        重算后清空按速度缓存——调用方需要时再调
+        :meth:`rebuild_speed_cache`。
+        """
         if not self.game_map:
             return []
         try:
@@ -330,16 +429,58 @@ class Sandbox:
             # 寻路失败时保留上一次结果，别让界面直接变空
             if not self.analyses:
                 self.analyses = []
+        self._by_route = {int(getattr(ra, "route_index", -1)): ra
+                          for ra in self.analyses}
+        # 速度缓存失效（基础路线变了）
+        self._speed_cache.clear()
         return self.analyses
 
+    def rebuild_speed_cache(self) -> int:
+        """B3 §5.7：按所有出怪事件的 ``moveSpeed`` 重建逐敌人移速缓存。
+
+        遍历 ``events()``，对每个 ``(route_index, round(speed, 4))``
+        组合算一次 ``analyze_route``，存入 ``_speed_cache``。
+        返回新建的缓存条目数。
+        """
+        if not self.game_map or not self._by_route:
+            return 0
+        blocked = self.boxes_only() or None
+        built = 0
+        for ev in self.events():
+            sk = self._speed_key(ev)
+            if sk in self._speed_cache:
+                continue
+            idx = sk[0]
+            if idx < 0 or idx >= len(self.game_map.routes):
+                continue
+            try:
+                self._speed_cache[sk] = RT.analyze_route(
+                    self.game_map, self.game_map.routes[idx],
+                    move_speed=sk[1], blocked=blocked,
+                    allow_diagonal=True)
+                built += 1
+            except Exception:
+                continue
+        return built
+
     def analysis_for(self, event_or_index) -> Optional[RT.RouteAnalysis]:
-        """按出怪事件（或路线下标）取路线分析。"""
-        idx = (event_or_index if isinstance(event_or_index, int)
-               else getattr(event_or_index, "route_index", -1))
-        for ra in self.analyses:
-            if getattr(ra, "route_index", None) == idx:
-                return ra
-        return None
+        """按出怪事件（或路线下标）取路线分析。
+
+        B3 §5.7：传入 ``event`` 时优先查按 ``(route_index, speed)``
+        缓存的分析结果（精确移速）；纯整数下标时退回全局默认
+        （``_by_route``，speed=1.0）。
+        """
+        if isinstance(event_or_index, int):
+            return self._by_route.get(int(event_or_index))
+        ev = event_or_index
+        idx = int(getattr(ev, "route_index", -1))
+        # 优先查逐敌人移速缓存
+        sk = self._speed_key(ev)
+        ra = self._speed_cache.get(sk)
+        if ra is not None:
+            return ra
+        # 降级：全局默认分析
+        return self._by_route.get(idx)
 
     # ------------------------------------------------------------ 位置推算
 
@@ -388,7 +529,10 @@ class Sandbox:
                     # 还没走到阻挡格，正常走
                     pass
                 elif float(seconds) < float(release_wall) - 1e-9:
-                    # 正在被挡：钉在干员格上，不再前进
+                    # 正在被挡：用 blocking.py 几何模型算分散落点（bug C 修复）
+                    anchor = self.block_anchor(event, seconds)
+                    if anchor is not None:
+                        return anchor
                     return (float(cell[0]), float(cell[1]))
                 else:
                     # 干员已撤退，敌人从阻挡格继续走剩下的路
@@ -406,8 +550,16 @@ class Sandbox:
 
     def _invalidate_plan(self) -> None:
         """状态变了，下一帧重新分配阻挡容量。"""
-        self._plan_cache_time = None
+        self._plan_cache_sig = None
         self._plan_cache = {}
+
+    def _plan_sig(self) -> tuple:
+        """干员配置签名：配置不变时阻挡计划也不变。"""
+        return tuple(sorted(
+            (d.uid, d.row, d.col, d.deploy_time,
+             d.retreat_time, d.block_count, d.can_block_fly)
+            for d in self.track.all()
+        ))
 
     def _route_cell_arrivals(self, ra) -> List[Tuple[Coord, float]]:
         """敌人无阻挡轨迹上每个格子的到达时刻（路线进度秒）。
@@ -494,10 +646,11 @@ class Sandbox:
         被严格限制住。
         """
         t = float(seconds)
-        # 同帧内反复问每只敌人只算一次；状态计数对不上就失效重算。
-        if (self._plan_cache_time == t and self._plan_cache is not None):
+        # 同配置内反复问每只敌人只算一次；状态计数对不上就失效重算。
+        sig = self._plan_sig()
+        if (self._plan_cache_sig == sig and self._plan_cache is not None):
             return self._plan_cache
-        self._plan_cache_time = t
+        self._plan_cache_sig = sig
         self._plan_cache = {}
         plan = self._plan_cache
         # 候选按 (格, 部署 uid) 分组：同一格可能撤退后再部署，是两段
@@ -514,6 +667,7 @@ class Sandbox:
                 continue
             flying = bool(getattr(ra, "flying", False))
             key = self._event_key(ev)
+            # B1 §4 bug A 修复：满票时 continue 看下一格，不再 break 整只丢弃
             for (cell, arr_eff) in self._route_cell_arrivals(ra):
                 arr_wall = t_spawn + self._wall_elapsed_for_route(ev, ra,
                                                                   arr_eff)
@@ -540,7 +694,7 @@ class Sandbox:
                     "release": release,
                     "cell": cell,
                 })
-                break
+                # B1 §4: 不 break —— 满票时继续看下一格（bug A 修复原逻辑在下方票券分配阶段处理）
         # 每格每段部署按到达先后发「挡票」；没拿到票的敌人漏过去。
         for (cell, uid), items in cands.items():
             dep = self.track.get(uid)
@@ -721,20 +875,35 @@ class Sandbox:
         except (IndexError, TypeError):
             return None
 
-    def deploy_check(self, row: int, col: int, is_ranged: bool) -> Tuple[bool, str]:
+    def deploy_check(self, row: int, col: int, is_ranged: bool,
+                     cost: float = 0.0, now: Optional[float] = None) -> Tuple[bool, str]:
         """这格能不能放这枚干员。返回 ``(可以, 原因)``。
 
         规则（与游戏一致）：
         * 远程位只能放高台（``HIGHLAND`` + ``buildable_ranged``）
         * 近战位只能放地面（``LOWLAND`` + ``buildable_melee``）
         * 已有干员或箱子的格子不能放
+        * B2 §5: 在场干员数达上限 → 拒绝
+        * B2 §5: 费用不足 → 拒绝
         """
         pos = (int(row), int(col))
         if pos in self.operators:
             return (False, "这格已经有干员了")
         if pos in self.boxes:
             return (False, "这格有箱子")
-        return can_deploy(self.tile_at(row, col), is_ranged)
+        ok, why = can_deploy(self.tile_at(row, col), is_ranged)
+        if not ok:
+            return (False, why)
+        # B2 §5: 人数上限
+        t = float(now) if now is not None else 0.0
+        alive = len(self.operators_alive(t))
+        if alive >= self.character_limit:
+            return (False, "在场干员已达上限 %d" % self.character_limit)
+        # B2 §5: 费用
+        self.dp.settle(t)
+        if cost > 0 and not self.dp.can_afford(cost):
+            return (False, "部署费用不足（需 %.0f，当前 %.0f）" % (cost, self.dp.current))
+        return (True, "")
 
     def box_check(self, row: int, col: int) -> Tuple[bool, str]:
         """箱子能不能放这里。
@@ -785,9 +954,21 @@ class Sandbox:
         ``dep`` 是 ``sandbox_track.Deployment``。让沙盘和粗轴共用同一个
         对象：撤退时把 ``retreat_time`` 填上，粗轴就自动有了正确区间，
         不需要在两处同步状态。
+
+        失败时把原因写进 :attr:`last_deploy_error`，界面据此显示真实
+        原因——返回 False 的原因有好几种，统一报「已经有干员了」会把
+        「费用不足」「挡住蓝门」全说成占位冲突，用户根本无从下手。
         """
+        self.last_deploy_error = ""
         pos = (int(row), int(col))
         if pos in self.operators:
+            self.last_deploy_error = "这格已经有干员了"
+            return False
+        # B2 §5: 扣费（失败则拒绝部署）
+        if dep.cost > 0 and not self.dp.spend(dep.cost):
+            self.last_deploy_error = (
+                "部署费用不足（需 %d，当前 %.0f）"
+                % (int(dep.cost), float(self.dp.current)))
             return False
         self.track.add(dep)
         piece = OperatorPiece(row, col, dep.op_id, dep.name, dep.profession,
@@ -798,6 +979,17 @@ class Sandbox:
         piece.can_block_fly = bool(getattr(dep, "can_block_fly", False))
         piece.ground = dep.ground
         piece.cost = int(dep.cost)
+        # B4 §7: 查基础范围 id（从 operators.json 或 character_table 缓存）
+        piece.range_id = self._lookup_range_id(dep.op_id)
+        # B4 §7: 立即算出初始朝向的范围格
+        if piece.range_id:
+            try:
+                from . import ranges as _R
+                cells = _R.get_cells(piece.range_id, dep.facing or "RIGHT")
+                if cells:
+                    piece.range_cells = cells
+            except Exception:
+                pass
         self.operators[pos] = piece
         self._invalidate_plan()
         return True
@@ -812,6 +1004,10 @@ class Sandbox:
         dep = self.track.get(int(getattr(piece, "uid", 0) or 0))
         if dep is not None and dep.retreat_time is None:
             dep.retreat_time = float(at_time or 0.0)
+            # B2 §5: 撤退返还 + 再部署惩罚
+            self.dp.refund(dep.cost)
+            if dep.op_id:
+                self._redeploy_penalty.add(dep.op_id)
         self._invalidate_plan()
         return True
 
@@ -819,6 +1015,63 @@ class Sandbox:
         for pos in list(self.operators.keys()):
             self.retreat(pos[0], pos[1], at_time)
         self._invalidate_plan()
+
+    def life_at(self, seconds: float) -> int:
+        """B2 §5: 某时刻的剩余生命值。
+
+        每只走到路线终点的敌人扣 ``lifePointReduce``（0 = 不计生命）。
+        返回剩余生命值，不会低于 0。
+        """
+        t = float(seconds)
+        lost = 0
+        for ev in self.events():
+            if self.is_kicked(ev):
+                continue
+            ra = self.analysis_for(ev)
+            if ra is None or not getattr(ra, "reachable", True):
+                continue
+            t_spawn = float(getattr(ev, "time", 0.0))
+            if t < t_spawn:
+                continue
+            at = self.arrival_time(ev)
+            if at is not None and t >= t_spawn + at:
+                # 这只敌人在 t 时刻已到达终点（漏了）
+                reduce_val = int(getattr(ev, "lifePointReduce", 1) or 1)
+                if reduce_val > 0:
+                    lost += reduce_val
+        return max(0, self.max_life - lost)
+
+    def deploy_cost_for(self, op_id: str) -> float:
+        """B2 §5: 算某干员当前实际部署费用（含再部署惩罚倍率）。
+
+        从 operators.json 取基础费用，乘以惩罚倍率。
+        查不到时返回 0。
+        """
+        base = self._get_operator_cost(op_id)
+        mult = self._redeploy_penalty.multiplier(op_id)
+        return round(base * mult, 1)
+
+    def _get_operator_cost(self, op_id: str) -> float:
+        """从 operators.json 取干员基础部署费用。"""
+        try:
+            from .prts_operator import OperatorCache as OC
+            oc = OC()
+            # op_id 是 char_id，需要反向查中文名
+            data = oc.data
+            for cname, info in data.items():
+                if info.get("char_id") == op_id:
+                    phases = info.get("phases", {})
+                    for ep in sorted(phases.keys(), reverse=True):
+                        lv_data = phases[ep]
+                        if isinstance(lv_data, dict):
+                            for lk in sorted(lv_data.keys(), reverse=True):
+                                v = lv_data[lk]
+                                if isinstance(v, dict) and "cost" in v:
+                                    return float(v["cost"])
+                    break
+        except Exception:
+            pass
+        return 0.0
 
     def operators_alive(self, seconds: Optional[float] = None) -> List[OperatorPiece]:
         """某时刻在场的干员。seconds 为 None 时返回当前全部。"""
@@ -900,20 +1153,54 @@ class Sandbox:
                    seconds: Optional[float] = None) -> Optional[OperatorPiece]:
         """这只敌人当前被谁挡住（没有则 None）。
 
-        「挡住」= 敌人所在的整格上有近战干员。游戏里敌人走到干员格
-        中心附近才被拦下，这里按取整格判定，与视觉上「贴到那一格」一致。
-
-        飞行敌人不吃地面阻挡，只有 ``can_block_fly`` 的干员能拦。
+        B1 §4: 使用 ``blocking.py`` 的平方距离几何模型（半径 0.707 格），
+        替代原来的整数格取整判定。最大偏差从 0.5 格降到 0。
         """
-        r = int(math.floor(float(row) + 0.5))
-        c = int(math.floor(float(col) + 0.5))
-        for pc in self.blockers(seconds):
-            if (pc.row, pc.col) != (r, c):
-                continue
-            if enemy_flying and not getattr(pc, "can_block_fly", False):
-                continue
-            return pc
+        try:
+            from . import blocking as BL
+            for pc in self.blockers(seconds):
+                if enemy_flying and not getattr(pc, "can_block_fly", False):
+                    continue
+                if BL.is_blocked((float(pc.row), float(pc.col)),
+                                 (float(row), float(col)),
+                                 flying=enemy_flying):
+                    return pc
+        except Exception:
+            # 降级到整数格判定（兼容 blocking.py 加载失败）
+            r = int(math.floor(float(row) + 0.5))
+            c = int(math.floor(float(col) + 0.5))
+            for pc in self.blockers(seconds):
+                if (pc.row, pc.col) != (r, c):
+                    continue
+                if enemy_flying and not getattr(pc, "can_block_fly", False):
+                    continue
+                return pc
         return None
+
+    def block_anchor(self, event, seconds: float) -> Optional[Tuple[float, float]]:
+        """B1 §4: 被挡敌人的分散落点（bug C 修复）。
+
+        用 ``blocking.apply_block_offset`` 把敌人推到干员半径 0.5 的圆边界上。
+        返回 (row, col) 浮点坐标，失败时返回 None（调用方退回格中心）。
+        """
+        try:
+            from . import blocking as BL
+            plan = self._blocking_plan(seconds)
+            rec = plan.get(self._event_key(event))
+            if rec is None:
+                return None
+            cell, arr_wall, release_wall, arr_eff, blocked = rec
+            if not blocked:
+                return None
+            op_pos = (float(cell[0]), float(cell[1]))
+            ra = self.analysis_for(event)
+            enemy_pos = ra.pose_at(arr_eff) if ra is not None else op_pos
+            if enemy_pos is None:
+                enemy_pos = op_pos
+            result = BL.apply_block_offset(op_pos, enemy_pos)
+            return result.final if result.moved else None
+        except Exception:
+            return None
 
     def blocked_count(self, piece: OperatorPiece,
                       seconds: Optional[float] = None) -> int:
@@ -1021,6 +1308,53 @@ class Sandbox:
                 continue
         return best
 
+    def _op_skill_sim(self, op_id: str) -> SkillSim:
+        """返回指定干员的 ``SkillSim``（带真实 ``attack_interval``）。
+
+        懒加载：首次查某 op_id 时从 ``operators.json`` 读
+        ``attack_interval`` 并缓存。查不到时降级为全局默认
+        ``self.skill_sim``（interval=1.0）。
+        """
+        if not op_id:
+            return self.skill_sim
+        sim = self._op_skill_sims.get(op_id)
+        if sim is not None:
+            return sim
+        # 查缓存
+        ai = self._op_attack_interval.get(op_id)
+        if ai is None:
+            ai = self._load_attack_interval(op_id)
+            self._op_attack_interval[op_id] = ai
+        sim = SkillSim(ai)
+        self._op_skill_sims[op_id] = sim
+        return sim
+
+    def _load_attack_interval(self, op_id: str) -> float:
+        """从 operators.json 加载指定干员的攻击间隔。"""
+        try:
+            import json, os as _os
+            from ..core.paths import Paths as _P
+            _paths = _P.default()
+            with open(_paths.operators_cache, "r", encoding="utf-8") as _f:
+                _data = json.load(_f)
+            for _name, _rec in _data.get("operators", {}).items():
+                if not isinstance(_rec, dict):
+                    continue
+                if _rec.get("char_id") == op_id or _rec.get("name") == op_id:
+                    _p0 = (_rec.get("phases") or {}).get("0", {})
+                    if not _p0:
+                        continue
+                    _lvl = sorted(
+                        [k for k in _p0.keys() if str(k).isdigit()],
+                        key=lambda x: int(x))[-1] if _p0 else None
+                    if _lvl is None:
+                        continue
+                    _ai = float(_p0[_lvl].get("attack_interval", 1.0))
+                    return max(0.05, _ai) if _ai > 0 else 1.0
+        except Exception:
+            pass
+        return 1.0
+
     def skill_state(self, piece_or_uid, seconds: float) -> dict:
         """某枚干员在某时刻的技能回转状态。"""
         dep = None
@@ -1042,8 +1376,9 @@ class Sandbox:
         # 的较大者，避免把同一枚干员的加成算两遍。
         boost = max(float(dep.sp_boost or 0.0),
                     self.aura_boost_for(float(seconds)))
-        return self.skill_sim.state_at(dep.skill, seconds, dep.deploy_time,
-                                       boost=boost)
+        sim = self._op_skill_sim(dep.op_id)
+        return sim.state_at(dep.skill, seconds, dep.deploy_time,
+                            boost=boost)
 
     def use_skill(self, piece_or_uid, at_time: float) -> bool:
         """在粗轴上记一次「开技能」。
@@ -1149,6 +1484,382 @@ class Sandbox:
             return False
         self._restore_history(self._redo_stack.pop())
         return True
+
+    # ------------------------------------------------------------ 沙盘结束机制（批次 A1）
+
+    # 敌人状态常量
+    ST_PENDING = "PENDING"
+    ST_MOVING = "MOVING"
+    ST_BLOCKED = "BLOCKED"
+    ST_WAITING = "WAITING"
+    ST_SLOWED = "SLOWED"
+    ST_LEAKED = "LEAKED"
+    ST_VANISHED = "VANISHED"
+    ST_KILLED = "KILLED"
+    ST_STUCK = "STUCK"
+
+    # 结束判据常量
+    VERDICT_RUNNING = "RUNNING"
+    VERDICT_ALL_RESOLVED = "ALL_RESOLVED"
+    VERDICT_DEADLOCK = "DEADLOCK"
+    VERDICT_TIMEOUT = "TIMEOUT"
+
+    def _enemy_state(self, event, seconds: float) -> str:
+        """返回单只敌人在 seconds 时刻的状态（八态之一）。"""
+        t = float(seconds)
+        t_spawn = float(getattr(event, "time", 0.0))
+
+        # PENDING：还没出场
+        if t < t_spawn:
+            return self.ST_PENDING
+
+        # KILLED：被踢掉
+        if self.is_kicked(event):
+            return self.ST_KILLED
+
+        ra = self.analysis_for(event)
+        if ra is None or not getattr(ra, "reachable", True):
+            # 路线不可达 → 当成消失
+            return self.ST_VANISHED
+
+        # 检查是否已到达终点（LEAKED 或 VANISHED）
+        pos = self.pose_at(event, t)
+        if pos is None:
+            # pose_at 返回 None 表示已离开路线
+            if getattr(ra, "vanish", False):
+                return self.ST_VANISHED
+            # 非 vanish 路线到达终点 = 漏了
+            return self.ST_LEAKED
+
+        # 检查阻挡状态
+        plan = {}
+        try:
+            plan = self._blocking_plan(t)
+        except Exception:
+            pass
+        rec = plan.get(self._event_key(event))
+        if rec is not None:
+            cell, arr_wall, release_wall, arr_eff, blocked = rec
+            if blocked:
+                if float(release_wall) == math.inf:
+                    # 永久阻挡 → STUCK
+                    return self.ST_STUCK
+                # 临时阻挡（干员会撤退）
+                if t < float(release_wall) - 1e-9:
+                    return self.ST_BLOCKED
+                # 已过释放时间，继续走（下面会判断 MOVING/SLOWED）
+
+        # 检查罚站（WAITING）——必须用状态判断，不用位移
+        elapsed = float(t - t_spawn)
+        head = self.spawn_unmovable_of(event)
+        if elapsed < head:
+            return self.ST_WAITING
+        elapsed -= head
+        route_elapsed = self._effective_elapsed(event, elapsed, t_spawn)
+        if ra is not None and hasattr(ra, "wait_span_at"):
+            try:
+                span = ra.wait_span_at(route_elapsed)
+                if span is not None and float(span) > 0:
+                    return self.ST_WAITING
+            except Exception:
+                pass
+
+        # 检查减速（SLOWED）
+        speed = self.speed_at(event, t)
+        if speed > 0 and speed < 1.0:
+            return self.ST_SLOWED
+
+        # 正常移动
+        return self.ST_MOVING
+
+    def state_at(self, seconds: float) -> dict:
+        """返回沙盘在指定时刻的完整状态快照。
+
+        返回 ``{time, enemies[], counts{}, verdict}``：
+        * ``enemies[]`` 每项含 key / enemy_id / row / col / state /
+          blocked_by / blocked_at / route_index / progress / eta_goal。
+        * ``counts`` 含 moving/blocked/waiting/leaked/vanished/killed/stuck/pending。
+        * ``verdict`` ∈ RUNNING | ALL_RESOLVED | DEADLOCK | TIMEOUT。
+        """
+        t = float(seconds)
+        enemies_info = []
+        counts = {self.ST_PENDING: 0, self.ST_MOVING: 0, self.ST_BLOCKED: 0,
+                  self.ST_WAITING: 0, self.ST_SLOWED: 0, self.ST_LEAKED: 0,
+                  self.ST_VANISHED: 0, self.ST_KILLED: 0, self.ST_STUCK: 0}
+
+        for ev in self.events():
+            state = self._enemy_state(ev, t)
+            counts[state] = counts.get(state, 0) + 1
+
+            entry = {
+                "key": self._event_key(ev),
+                "enemy_id": getattr(ev, "enemy_id", ""),
+                "state": state,
+                "route_index": int(getattr(ev, "route_index", -1)),
+            }
+            # 位置信息（非终态才有意义）
+            if state not in (self.ST_LEAKED, self.ST_VANISHED, self.ST_KILLED):
+                pos = self.pose_at(ev, t)
+                if pos is not None:
+                    entry["row"] = round(pos[0], 2)
+                    entry["col"] = round(pos[1], 2)
+
+            # 阻挡详情
+            if state == self.ST_BLOCKED or state == self.ST_STUCK:
+                try:
+                    plan = self._blocking_plan(t)
+                    rec = plan.get(self._event_key(ev))
+                    if rec is not None:
+                        cell, arr_wall, release_wall, arr_eff, blocked = rec
+                        entry["blocked_by"] = {
+                            "cell": [int(cell[0]), int(cell[1])],
+                            "blocked_at": round(float(arr_wall), 2),
+                            "release_at": None if release_wall == math.inf
+                                           else round(float(release_wall), 2),
+                        }
+                        dep_uid = None
+                        for d in self.track.all():
+                            if (int(d.row), int(d.col)) == (int(cell[0]),
+                                                              int(cell[1])):
+                                dep_uid = d.uid
+                                break
+                        if dep_uid is not None:
+                            entry["blocked_by"]["uid"] = dep_uid
+                except Exception:
+                    pass
+
+            # 预计到达时间
+            if state in (self.ST_MOVING, self.ST_SLOWED, self.ST_BLOCKED,
+                         self.ST_WAITING, self.ST_PENDING):
+                entry["eta_goal"] = self._eta_for_enemy(ev, t)
+
+            enemies_info.append(entry)
+
+        verdict = self._verdict_at(t, counts)
+        return {
+            "time": t,
+            "enemies": enemies_info,
+            "counts": counts,
+            "verdict": verdict,
+        }
+
+    def _eta_for_enemy(self, event, current_t: float) -> Optional[float]:
+        """估算敌人从当前时刻到到达蓝门还需多少秒。无法到达返回 None。"""
+        ra = self.analysis_for(event)
+        if ra is None or not getattr(ra, "reachable", True):
+            return None
+        if getattr(ra, "vanish", False):
+            return None  # vanish 路线不到蓝门
+
+        t_spawn = float(getattr(event, "time", 0.0))
+        # 如果已被永久挡住
+        state = self._enemy_state(event, current_t)
+        if state == self.ST_STUCK:
+            return None
+
+        # 当前位置对应的路线进度
+        pos = self.pose_at(event, current_t)
+        if pos is None:
+            # 已经到了（leaked/vanished）
+            return 0.0
+
+        # 从当前点算剩余路程需要的墙钟时间
+        # 简化：用 arrival_time 减去已消耗的墙钟时间
+        total_arrival = self.arrival_time(event)
+        if total_arrival is None:
+            return None
+        elapsed = max(0.0, current_t - t_spawn)
+        remaining = max(0.0, total_arrival - elapsed)
+        # 如果被临时阻挡，加上等待释放的时间
+        try:
+            plan = self._blocking_plan(current_t)
+            rec = plan.get(self._event_key(event))
+            if rec is not None:
+                _, arr_wall, release_wall, _, blocked = rec
+                if blocked and release_wall != math.inf:
+                    wait_more = max(0.0, float(release_wall) - current_t)
+                    remaining += wait_more
+        except Exception:
+            pass
+        return round(remaining, 2) if remaining < 9999 else None
+
+    def _verdict_at(self, t: float, counts: dict) -> str:
+        """根据当前状态计数判定沙盘结束类型。"""
+        n_total = sum(counts.values())
+        if n_total == 0:
+            return self.VERDICT_ALL_RESOLVED
+
+        terminal = {self.ST_LEAKED, self.ST_VANISHED, self.ST_KILLED}
+        stagnant = {self.ST_BLOCKED, self.ST_WAITING, self.ST_STUCK}
+        active = {self.ST_MOVING, self.ST_SLOWED}
+
+        # 判据 A：全部解决
+        if all(counts.get(s, 0) == 0 for s in active | {self.ST_PENDING} |
+               stagnant):
+            return self.VERDICT_ALL_RESOLVED
+
+        # 判据 B：全部停滞（至少一只在停滞态，无活跃/待出场）
+        has_stagnant = any(counts.get(s, 0) > 0 for s in stagnant)
+        no_active = all(counts.get(s, 0) == 0 for s in active | {self.ST_PENDING})
+        if has_stagnant and no_active:
+            return self.VERDICT_DEADLOCK
+
+        # 判据 C：安全上限
+        # 找无阻挡总时长
+        max_arrival = 0.0
+        for ev in self.events():
+            at = self.arrival_time(ev)
+            if at is not None:
+                max_arrival = max(max_arrival, float(at))
+        safe_limit = max(600.0, 3.0 * max(300.0, max_arrival))
+        if t > safe_limit:
+            return self.VERDICT_TIMEOUT
+
+        return self.VERDICT_RUNNING
+
+    def solve_end(self) -> dict:
+        """计算沙盘收尾时刻与最终判据。
+
+        返回 ``{end_time, verdict, leaked, vanished, killed,
+        stuck[], life_lost, warnings[]}``。多次调用幂等。
+
+        算法：
+        * 对每只敌人算「尘埃落定」时刻；
+        * 取最大值作为 end_time；
+        * 在 end_time 处做最终状态判定。
+        """
+        arrivals = []  # (end_time_for_this_enemy, event, reason)
+        stuck_list = []
+        leaked_list = []
+
+        for ev in self.events():
+            if self.is_kicked(ev):
+                arrivals.append((float(getattr(ev, "time", 0.0)), ev,
+                                 "killed"))
+                continue
+
+            ra = self.analysis_for(ev)
+            t_spawn = float(getattr(ev, "time", 0.0))
+
+            if ra is None or not getattr(ra, "reachable", True):
+                arrivals.append((t_spawn, ev, "unreachable"))
+                continue
+
+            # 检查阻挡情况
+            final_t = t_spawn
+            reason = "normal"
+            is_stuck = False
+
+            # 遍历所有可能的阻挡格，找到最早的实际阻挡
+            try:
+                # 用一个足够晚的时刻来查阻挡计划
+                far_t = t_spawn + 10000.0
+                plan = self._blocking_plan(far_t)
+                rec = plan.get(self._event_key(ev))
+                if rec is not None:
+                    cell, arr_wall, release_wall, arr_eff, blocked = rec
+                    if blocked:
+                        if float(release_wall) == math.inf:
+                            # 永久阻挡 → STUCK
+                            final_t = float(arr_wall)
+                            reason = "stuck"
+                            is_stuck = True
+                            stuck_entry = {
+                                "enemy_id": getattr(ev, "enemy_id", ""),
+                                "key": self._event_key(ev),
+                                "route_index": int(getattr(ev, "route_index",
+                                                           -1)),
+                                "cell": [int(cell[0]), int(cell[1])],
+                                "blocked_at": round(float(arr_wall), 2),
+                            }
+                            # 找到阻挡者
+                            for d in self.track.all():
+                                if ((int(d.row), int(d.col)) ==
+                                        (int(cell[0]), int(cell[1]))):
+                                    stuck_entry["blocker_uid"] = d.uid
+                                    stuck_entry["blocker_name"] = d.name
+                                    break
+                            stuck_list.append(stuck_entry)
+                        else:
+                            # 临时阻挡：从释放时刻继续走完剩余路程
+                            release = float(release_wall)
+                            # 剩余路程 = 总路程 - 到达阻挡格时的进度
+                            remaining_route = (float(getattr(ra, "total_time", 0.0))
+                                               - float(arr_eff))
+                            if remaining_route <= 0:
+                                final_t = release
+                            else:
+                                # 从释放点走完剩余需要多少墙钟秒
+                                wall_remaining = self._wall_elapsed_for_route(
+                                    ev, ra, remaining_route)
+                                final_t = release + wall_remaining
+                            reason = "blocked_then_released"
+                    else:
+                        # 不被挡 → 正常走到终点
+                        at = self.arrival_time(ev)
+                        final_t = t_spawn + (float(at) if at else 0.0)
+                        reason = "normal"
+                else:
+                    # 无阻挡记录 → 正常走到终点
+                    at = self.arrival_time(ev)
+                    final_t = t_spawn + (float(at) if at else 0.0)
+                    reason = "normal"
+            except Exception:
+                at = self.arrival_time(ev)
+                final_t = t_spawn + (float(at) if at else 0.0)
+                reason = "normal"
+
+            # vanish 路线特殊处理
+            if getattr(ra, "vanish", False) and not is_stuck:
+                at = self.arrival_time(ev)
+                final_t = t_spawn + (float(at) if at else 0.0)
+                reason = "vanish"
+
+            arrivals.append((final_t, ev, reason))
+
+        if not arrivals:
+            return {"end_time": 60.0, "verdict": self.VERDICT_ALL_RESOLVED,
+                    "leaked": [], "vanished": [], "killed": [],
+                    "stuck": [], "life_lost": 0, "warnings": []}
+
+        end_time = max(a[0] for a in arrivals)
+        end_time = max(end_time, 60.0)  # 至少 60 秒
+
+        # 在 end_time 做最终状态判定（加微小 epsilon 避免边界处
+        # pose_at 仍返回非 None 导致敌人被误判为 MOVING）
+        final = self.state_at(end_time + 0.05)
+        leaked = [e for e in final["enemies"]
+                  if e["state"] == self.ST_LEAKED]
+        vanished = [e for e in final["enemies"]
+                    if e["state"] == self.ST_VANISHED]
+        killed = [e for e in final["enemies"]
+                  if e["state"] == self.ST_KILLED]
+
+        # B2 §5: 生命值扣减——按敌人真实 lifePointReduce 计算
+        # 0 表示不计生命的单位（召唤物、无害单位），不能漏算成 1
+        life_lost = 0
+        for e in leaked:
+            reduce_val = int(getattr(e.get("event", {}), "lifePointReduce", 1) or 1)
+            if reduce_val > 0:
+                life_lost += reduce_val
+
+        warnings = []
+        if final["verdict"] == self.VERDICT_DEADLOCK:
+            warnings.append("死锁：%d 只敌人被永久阻挡" %
+                             final["counts"].get(self.ST_STUCK, 0))
+        if len(leaked) > 0:
+            warnings.append("%d 只敌人漏入蓝门" % len(leaked))
+
+        return {
+            "end_time": round(end_time, 2),
+            "verdict": final["verdict"],
+            "leaked": leaked,
+            "vanished": vanished,
+            "killed": killed,
+            "stuck": stuck_list,
+            "life_lost": life_lost,
+            "warnings": warnings,
+        }
 
     def summary(self) -> str:
         """一行状态描述，给状态栏用。"""

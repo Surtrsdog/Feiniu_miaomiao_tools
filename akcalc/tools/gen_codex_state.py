@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """生成 codex_fields.json 的 statemachines 段（状态机图鉴）。
 
 设计依据见 docs/状态机图鉴_方案.md。这里只做**数据层**：把每个技能
@@ -38,8 +38,13 @@ def last_level(sk):
     return lv[-1] if lv else {}
 
 
-def build_one(sid, sk):
-    """把一个技能翻译成状态机描述。返回 None 表示不建模。"""
+def build_one(sid, sk, atk_interval=None):
+    """把一个技能翻译成状态机描述。返回 None 表示不建模。
+
+    ``atk_interval`` 是该干员的攻击间隔（秒）。攻击回复类技能靠它把
+    「要打几次」换成「要多少秒」——没有它就只能报次数。受击回复类
+    永远只能报次数，因为受击频率取决于敌人，不是干员的固有属性。
+    """
     lv = last_level(sk)
     sd = lv.get("spData") or {}
     name = lv.get("name") or sid
@@ -76,17 +81,40 @@ def build_one(sid, sk):
     states = []
     # ---- 首次充能：从 initSp 起步
     first = max(0.0, cost - init)
+    first_hits = first / inc if inc > 0 else 0.0
+    # 攻击回复能换算成秒（干员攻击间隔固定）；受击回复不能（取决于挨打频率）
+    atk_sec = None
+    if (spt == "INCREASE_WHEN_ATTACK" and atk_interval and inc > 0):
+        atk_sec = first / inc * float(atk_interval)
     if spt == "INCREASE_WITH_TIME" and inc > 0:
         first_t = "%.1f 秒" % (first / inc)
+    elif atk_sec is not None:
+        first_t = "%.1f 秒（%g 次攻击 × %.3f 秒）" % (
+            atk_sec, first_hits, float(atk_interval))
+    elif spt == "INCREASE_WHEN_ATTACK":
+        first_t = "%g 次攻击" % first_hits
+    elif spt == "INCREASE_WHEN_TAKEN_DAMAGE":
+        first_t = "%g 次受击" % first_hits
     else:
-        first_t = "约 %.1f 点 SP" % first
+        first_t = "约 %g 点 SP" % first
     states.append({"state": "CHARGING（首次）",
                    "duration": first_t,
                    "note": "spCost − initSp = %g − %g" % (cost, init)})
 
     # ---- 之后每轮充能
+    cyc_hits = cost / inc if inc > 0 else 0.0
+    cyc_sec = None
+    if (spt == "INCREASE_WHEN_ATTACK" and atk_interval and inc > 0):
+        cyc_sec = cost / inc * float(atk_interval)
     if spt == "INCREASE_WITH_TIME" and inc > 0:
         cyc_t = "%.1f 秒" % (cost / inc)
+    elif cyc_sec is not None:
+        cyc_t = "%.1f 秒（%g 次攻击 × %.3f 秒）" % (
+            cyc_sec, cyc_hits, float(atk_interval))
+    elif spt == "INCREASE_WHEN_ATTACK":
+        cyc_t = "%g 次攻击" % cyc_hits
+    elif spt == "INCREASE_WHEN_TAKEN_DAMAGE":
+        cyc_t = "%g 次受击" % cyc_hits
     elif spt == "8":
         cyc_t = "不会自然填充"
     else:
@@ -121,13 +149,38 @@ def build_one(sid, sk):
                    "note": "游戏里技能结束就直接从 0 攒，不存在独立冷却"})
 
     # ---- 稳态指标
+    # 攻击回复能给出确定秒数（攻击间隔是干员固有属性）；受击回复给不出，
+    # 因为挨打频率由敌人决定——这种情况下只报次数，不编秒数。
     metrics = {}
-    if spt == "INCREASE_WITH_TIME" and inc > 0 and dur > 0:
-        metrics["首次可开启"] = "%.1f 秒" % (first / inc)
-        metrics["循环周期"] = "%.1f 秒" % (cost / inc + dur)
-        cov = dur / (cost / inc + dur) * 100.0
-        metrics["稳态覆盖率"] = "%.1f%%（%g / (%g + %g)）" % (
-            cov, dur, cost / inc, dur)
+    charge_t = None
+    if spt == "INCREASE_WITH_TIME" and inc > 0:
+        charge_t = cost / inc
+    elif spt == "INCREASE_WHEN_ATTACK" and atk_interval and inc > 0:
+        charge_t = cost / inc * float(atk_interval)
+
+    if charge_t is not None:
+        # 瞬发技能（dur = 0）没有 ACTIVE 时长，但循环周期仍然等于充能时长
+        metrics["首次可开启"] = "%.1f 秒" % (first / inc * (
+            float(atk_interval) if spt == "INCREASE_WHEN_ATTACK" else 1.0))
+        if dur > 0:
+            metrics["循环周期"] = "%.1f 秒" % (charge_t + dur)
+            cov = dur / (charge_t + dur) * 100.0
+            metrics["稳态覆盖率"] = "%.1f%%（%g / (%g + %g)）" % (
+                cov, dur, charge_t, dur)
+        elif dur == 0:
+            # 瞬发：没有 ACTIVE 时长，循环 = 充能 + 0
+            metrics["循环周期"] = "%.1f 秒（每次充能后瞬发）" % charge_t
+        else:
+            # dur < 0 = 无限持续或弹药型，关不掉就谈不上循环
+            metrics["循环周期"] = "%.1f 秒充能（技能持续到手动关闭）" % charge_t
+    elif spt == "INCREASE_WHEN_ATTACK" and inc > 0:
+        metrics["首次可开启"] = first_t
+        if dur > 0 and atk_interval:
+            metrics["说明"] = ("无攻击目标时不涨 SP；"
+                               "上方秒数按不停攻击估算，是下限")
+    elif spt == "INCREASE_WHEN_TAKEN_DAMAGE":
+        metrics["首次可开启"] = first_t
+        metrics["说明"] = "挨打频率由敌人决定，无法给出秒数"
     else:
         metrics["首次可开启"] = first_t
 
@@ -155,18 +208,92 @@ def build_one(sid, sk):
     }
 
 
+def _atk_interval_table():
+    """char_id -> 攻击间隔（秒）。
+
+    取**最高精英阶段、最高等级**的 ``attack_interval``。注意不能只看
+    ``phases['2']``——克洛丝、史都华德这类只有精英 1 的干员没有该键，
+    会全部漏掉。
+    """
+    p = os.path.join(DATA, "cache", "operators.json")
+    try:
+        ops = json.load(io.open(p, encoding="utf-8")).get("operators") or {}
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for _name, v in ops.items():
+        cid = v.get("char_id")
+        if not cid:
+            continue
+        ph = v.get("phases") or {}
+        stages = [k for k in ph if str(k).isdigit()]
+        if not stages:
+            continue
+        top = ph[max(stages, key=int)] or {}
+        lvs = [k for k in top if str(k).isdigit()]
+        if not lvs:
+            continue
+        ai = (top[max(lvs, key=int)] or {}).get("attack_interval")
+        if ai:
+            out[cid] = float(ai)
+    return out
+
+
+def _skill_owner_index():
+    """skill_id -> char_id。
+
+    ``skill_table_full`` 里没有 charKey，``operators.json`` 里也没有
+    skill_id，两边只能用 ``skilldata.lookup()`` 按技能名握手（它能处理
+    ``skcom_*`` 共用技能）。这里把结果反过来建成一张表。
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
+        from akcalc.core import skilldata as SD
+    except ImportError:
+        return {}
+    try:
+        table = SD.load_full()
+        ni = SD.build_name_index(table)
+        p = os.path.join(DATA, "cache", "operators.json")
+        ops = json.load(io.open(p, encoding="utf-8")).get("operators") or {}
+    except (OSError, ValueError):
+        return {}
+    owner = {}
+    for _name, v in ops.items():
+        cid = v.get("char_id")
+        if not cid:
+            continue
+        for sk in (v.get("skills") or []):
+            nm = sk.get("name")
+            if not nm:
+                continue
+            e = SD.lookup(table, ni, cid, nm, sk.get("index") or 1)
+            sid = (e or {}).get("skillId")
+            if sid and sid not in owner:
+                owner[sid] = cid
+    return owner
+
+
 def main():
     p = os.path.join(DATA, "skill_table_full.json")
     d = json.load(io.open(p, encoding="utf-8"))
+    ai_of = _atk_interval_table()
+    owner = _skill_owner_index()
     out = []
     for sid, sk in d.items():
-        r = build_one(sid, sk)
+        ai = ai_of.get(owner.get(sid))
+        r = build_one(sid, sk, ai)
         if r:
             out.append(r)
-    # 只保留有完整 SP 循环的（能算出实际秒数的），避免图鉴被
-    # 「不回复」类技能淹没
-    full = [r for r in out
-            if r["metrics"].get("循环周期") or r["metrics"].get("稳态覆盖率")]
+    # 保留三类可建模的：
+    #   1) 自然回复 / 攻击回复：能算出秒数，有完整 SP 循环
+    #   2) 受击回复：算不出秒数，但能报「要挨几次打」，对沙盘仍有意义
+    # spType=8（不回复）且 spCost=0 的是被动技能，本来就没有 SP 循环，丢弃。
+    def _keep(r):
+        m = r["metrics"]
+        return bool(m.get("循环周期") or m.get("稳态覆盖率")
+                    or "次受击" in str(m.get("首次可开启") or ""))
+    full = [r for r in out if _keep(r)]
     full.sort(key=lambda r: r["name"])
 
     cp = os.path.join(DATA, "codex_fields.json")

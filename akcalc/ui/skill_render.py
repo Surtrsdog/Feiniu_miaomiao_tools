@@ -69,7 +69,7 @@ def render_skills(master, blocks, env: Optional[dict] = None, *,
         lines = list(block.get("lines") or [])
         if not lines and block.get("source") == "code":
             lines = ["（PRTS 与敌人档案都没有这个技能的描述，"
-                     "只有解包里的 prefabKey 和参数表）"]
+                     "只有数据里的 prefabKey 和参数表）"]
         for txt in lines:
             tk.Label(box, text=txt, background=BG_PANEL, foreground=FG,
                      font=(FONT_UI, FS_SMALL), anchor="w", justify="left",
@@ -108,7 +108,7 @@ def _source_tag(master, block: dict) -> None:
     elif src == "handbook":
         txt, tip = "敌人档案", "PRTS 未收录该技能，退回游戏内敌人档案文案"
     else:
-        txt, tip = "仅解包", "PRTS 与敌人档案都没有该技能的描述"
+        txt, tip = "仅数据", "PRTS 与敌人档案都没有该技能的描述"
     lbl = tk.Label(master, text=" %s" % txt, background=BG_PANEL,
                    foreground=FG_DIM, font=(FONT_UI, FS_MICRO))
     lbl.pack(side="left", padx=(PAD_S, 0))
@@ -177,8 +177,8 @@ def render_annot(master, annot: dict, *, sure: bool = True,
                  font=(FONT_NUM, FS_MICRO), anchor="w", justify="left",
                  wraplength=wrap).pack(fill="x")
     if limit < len(bb):
-        tk.Label(master, text="　…另有 %d 项（「查看原代码」里可看全）"
-                 % (len(bb) - limit), background=BG_PANEL, foreground=FG_DIM,
+        tk.Label(master, text="　…另有 %d 项参数" % (len(bb) - limit),
+                 background=BG_PANEL, foreground=FG_DIM,
                  font=(FONT_UI, FS_MICRO), anchor="w").pack(fill="x")
     for note in annot.get("notes") or []:
         tk.Label(master, text="　※ " + note, background=BG_PANEL,

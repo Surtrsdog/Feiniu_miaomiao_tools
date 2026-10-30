@@ -24,7 +24,7 @@
 真正的执行体（行为树 / 状态机）在客户端二进制里，**数据里不存在**。
 所以这里给的是「从数值与键名反推出的动作序列」，而非官方脚本；
 凡是由命名约定推断的地方都如实标出。敌人技能连
-``codex_fields.json`` 的 ``statemachines`` 都没有（那 525 条全是干员技能），
+``codex_fields.json`` 的 ``statemachines`` 都没有（那里只收录干员技能），
 这一点也要写出来，不能拿干员状态机去套。
 """
 from __future__ import annotations

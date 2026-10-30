@@ -409,7 +409,29 @@ def analyze_route(game_map: GameMap,
 
 def analyze_all(game_map: GameMap, move_speed: float = 1.0,
                 blocked: Optional[set] = None,
-                allow_diagonal: Optional[bool] = None) -> List[RouteAnalysis]:
+                allow_diagonal: Optional[bool] = None,
+                include_devices: bool = True) -> List[RouteAnalysis]:
+    """分析全部路线。
+
+    ``include_devices=True`` 时并入关卡预置的改路装置（category A）。
+
+    重要：A 类装置（障碍物/碎石等）在游戏内是**可被破坏的**——敌人遇到
+    它们会停下来打掉再继续走。所以寻路时**不把它们当作不可通行**，
+    只是不影响路径选择（路线检查点已经指定了敌人的行进路径）。
+    之前把它们加入 ``blocked`` 会导致好梦在何方等关卡的路线全部不可达
+    （碎石恰好铺在路线检查点上），敌人直接从地图上消失。
+
+    传 ``include_devices=False`` 可复现「装置接入前」的结果，用于回归对照。
+    """
+    # A 类装置不再加入 blocked —— 它们可被破坏，不应阻断寻路。
+    # B 类装置（实体阻挡如盾卫/路障）才真正挡路，但目前没有 B 类被标
+    # affects_route=True，所以这里实质上不再往 blocked 里加任何装置格。
+    if include_devices:
+        # 仅 B 类 affects_route 的装置才真正阻挡（当前数据中没有这种）
+        dev_cells = {(d.row, d.col) for d in game_map.devices
+                     if d.affects_route and d.category == "B"}
+        if dev_cells:
+            blocked = set(blocked or ()) | dev_cells
     return [analyze_route(game_map, r, move_speed, blocked, allow_diagonal)
             for r in game_map.routes]
 

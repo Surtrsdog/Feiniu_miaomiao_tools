@@ -1,0 +1,93 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>肥牛妙妙工具 · UI 设计稿总览</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--line:#e8ebf0;--fg:#14181d;--dim:#6b7480;--faint:#9aa2ae;--blue:#2b7cf7;--blue-soft:#eaf2fe}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:"Microsoft YaHei UI","Segoe UI",system-ui,sans-serif;min-height:100vh;padding:52px 26px 80px}
+  .wrap{max-width:1140px;margin:0 auto}
+  .kicker{color:var(--blue);font-size:12.5px;letter-spacing:3px;font-weight:700}
+  h1{font-size:36px;margin:12px 0 14px;letter-spacing:.5px}
+  .lead{color:var(--dim);font-size:15.5px;line-height:1.85;max-width:780px}
+  .note{margin-top:20px;padding:14px 18px;border-radius:14px;background:var(--blue-soft);border:1px solid #d7e6fd;color:#1a4f9e;font-size:13.5px;line-height:1.8}
+  .note b{color:#0f3d80}
+  header{margin-bottom:34px}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:22px}
+  @media (max-width:880px){.grid{grid-template-columns:1fr}}
+  .card{display:block;text-decoration:none;color:inherit;background:#fff;border:1px solid var(--line);border-radius:20px;overflow:hidden;transition:.18s;box-shadow:0 1px 2px rgba(16,24,40,.04),0 10px 30px rgba(16,24,40,.04)}
+  .card:hover{transform:translateY(-4px);border-color:#cfdcf0;box-shadow:0 16px 40px rgba(16,24,40,.1)}
+  .prev{height:150px;display:flex;align-items:center;justify-content:center;font-size:15px;letter-spacing:2px;font-weight:700;border-bottom:1px solid var(--line)}
+  .d .prev{background:linear-gradient(135deg,#f7f9fc,#eaf2fe);color:#2b7cf7}
+  .a .prev{background:linear-gradient(135deg,#101722,#274a75);color:#9ecbff}
+  .b .prev{background:linear-gradient(180deg,#f6f1e6,#efe6d2);color:#7a5c2e}
+  .c .prev{background:linear-gradient(135deg,#0b1119,#12233a);color:#6fd4ff}
+  .body{padding:20px 22px 24px}
+  .tag{display:inline-block;font-size:11.5px;padding:4px 11px;border-radius:999px;margin-bottom:11px;font-weight:600}
+  .d .tag{background:var(--blue-soft);color:var(--blue);border:1px solid #d7e6fd}
+  .a .tag{background:#eef5ff;color:#2b7cf7;border:1px solid #d7e6fd}
+  .b .tag{background:#fbf3e2;color:#9a6d2b;border:1px solid #ecdcbb}
+  .c .tag{background:#e6f7fd;color:#1f8fbe;border:1px solid #c6ecf8}
+  h2{font-size:20px;margin-bottom:8px;display:flex;align-items:center;gap:9px}
+  .rec{font-size:11px;font-weight:700;color:#0e9f5c;background:#e8f8f0;border:1px solid #c4eeda;padding:2px 8px;border-radius:999px;letter-spacing:.5px}
+  p{color:var(--dim);font-size:13.5px;line-height:1.8}
+  .pages{margin-top:13px;font-size:12.5px;color:var(--faint);display:flex;gap:14px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="kicker">FEINIU TOOLS · UI REDESIGN</div>
+    <h1>界面重设计 · 四套方向稿</h1>
+    <p class="lead">每套都包含<b>主界面 / 干员图鉴 / 怪物图鉴 / DPS 计算</b>四个页面。纯静态 HTML，双击用浏览器打开即可交互预览，点侧边栏或顶部导航切换页面。</p>
+    <div class="note">
+      <b>方案 D 是按你给的参考图新做的</b>：浅色极简 SaaS 风——近白冷灰底、白色大圆角卡片、极淡描边几乎无阴影、单一蓝色主色、浮动胶囊侧边栏、面包屑导航、灰底步骤卡配浅蓝圆形序号。其余三版是之前的方向备选，可对比取舍。
+    </div>
+  </header>
+
+  <div class="grid">
+    <a class="card d" href="design_d_light_saas.html">
+      <div class="prev">D · 浅色极简 SaaS</div>
+      <div class="body">
+        <span class="tag">MATCHES REFERENCE</span>
+        <h2>方案 D <span class="rec">按参考图</span></h2>
+        <p>近白冷灰底 + 白色大圆角卡片 + 极淡描边 + 单一蓝色主色。浮动胶囊侧边栏、面包屑、灰底步骤卡搭浅蓝圆序号，留白充足，克制干净。</p>
+        <div class="pages"><span>主界面</span><span>干员图鉴</span><span>怪物图鉴</span><span>DPS 计算</span></div>
+      </div>
+    </a>
+
+    <a class="card a" href="design_a_dark_glass.html">
+      <div class="prev">A · 现代深色玻璃</div>
+      <div class="body">
+        <span class="tag">DARK GLASS</span>
+        <h2>方案 A</h2>
+        <p>深色底 + 玻璃拟态卡片 + 蓝紫渐变光斑，悬浮辉光与留白划分层级。是现有深色主题的「精修升级版」。</p>
+        <div class="pages"><span>主界面</span><span>干员图鉴</span><span>怪物图鉴</span><span>DPS 计算</span></div>
+      </div>
+    </a>
+
+    <a class="card b" href="design_b_prts_light.html">
+      <div class="prev">B · PRTS 纸张浅色</div>
+      <div class="body">
+        <span class="tag">LIGHT WIKI</span>
+        <h2>方案 B</h2>
+        <p>暖色纸张 + wiki 排版 + 琥珀金点缀，安静耐读、数据密度高，适合长时间翻阅图鉴。</p>
+        <div class="pages"><span>主界面</span><span>干员图鉴</span><span>怪物图鉴</span><span>DPS 计算</span></div>
+      </div>
+    </a>
+
+    <a class="card c" href="design_c_game_hud.html">
+      <div class="prev">C · 游戏内 HUD</div>
+      <div class="body">
+        <span class="tag">GAME HUD</span>
+        <h2>方案 C</h2>
+        <p>几何切角面板 + 细亮描边 + 菱形节点 + 等宽数字，明日方舟游戏内 UI 味道最浓。</p>
+        <div class="pages"><span>主界面</span><span>干员图鉴</span><span>怪物图鉴</span><span>DPS 计算</span></div>
+      </div>
+    </a>
+  </div>
+</div>
+</body>
+</html>

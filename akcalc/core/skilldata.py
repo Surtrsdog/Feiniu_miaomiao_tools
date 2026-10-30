@@ -133,6 +133,25 @@ _RE_TIMES_CN = re.compile(r"([一二两三四五六七八九十])\s*次")
 _RE_TIMES_AR = re.compile(r"(?<![0-9.])(\d{1,2})\s*次")
 _RE_HITS_AR = re.compile(r"(?<![0-9.])(\d{1,2})\s*连(?:击|射)")
 
+#: 「额外造成的段数」——这里的 N **不是**总段数，而是附加在主攻击之外的段数，
+#: 实际总段数 = 1 + N。典型的三种写法：
+#:
+#:   「下次攻击额外造成 2 次余震…」      （维什戴尔「定点清算」、逻各斯「末梢阻断」）
+#:   「额外斩击目标 4 次」                （缇缇「可驯服的」）
+#:   「生命低于 X 时额外攻击 2 次」        （左乐「破虏」）
+#:
+#: 老代码把 N 直接当成总段数，于是这四类技能全都少算一段：2 段算成 2 段
+#: 看着没差，但主攻击那一下丢了。DPS 因此偏低 30% 上下。
+#:
+#: 只认「次 / 段」结尾，所以「额外攻击 2 个目标」这类讲**目标数**的写法
+#: 不会误命中（它以「个」收尾）。
+_RE_EXTRA_HITS = re.compile(
+    r"(?:额外|追加)"
+    r"(?:造成|斩击|攻击|射击|施加|发动|命中|触发|结算)?"
+    r"[^。；\n，,]{0,12}?"
+    r"(\d{1,2}|[一二两三四五六七八九十])\s*(?:次|段)"
+)
+
 
 #: 官方描述里夹着 <@ba.vup>10</> 这类富文本标签，标签会把数字和
 #: 后面的「次 / 连击」隔开，不剥掉就永远匹配不上。
@@ -262,6 +281,24 @@ def _counts_other_objects(text: str, n: int) -> bool:
     return bool(pat.search(text))
 
 
+def _parse_extra_hits(desc: str) -> int:
+    """描述里「额外/追加 N 次」→ 返回附加段数 N（不是总段数）。
+
+    返回 0 表示没有这种写法。调用方负责把它换算成 1 + N。
+    """
+    if not desc:
+        return 0
+    text = _strip_tags(desc)
+    # 「额外」前面常带条件从句（「生命低于 X 时额外攻击 2 次」），
+    # 这里不整句剔除，否则条件式追加会被漏掉。
+    for m in _RE_EXTRA_HITS.finditer(text):
+        raw = m.group(1)
+        n = int(raw) if raw.isdigit() else _CN_NUM.get(raw, 0)
+        if 1 <= n <= 20:
+            return n
+    return 0
+
+
 def _parse_hits_from_text(desc: str) -> int:
     """从技能描述里读连击数。
 
@@ -280,10 +317,18 @@ def _parse_hits_from_text(desc: str) -> int:
     排除办法：先按分句切开，去掉带这些语义的分句，再在剩下的文字里找
     「N 连击 / N 连射」。这么改之前，闪击的一技能（4 次技能）被算成
     4 连击、艾雅法拉二技能被算成 2 连击，DPS 直接翻好几倍。
+
+    另外「额外 / 追加 N 次」是**附加**段数，总段数应为 1 + N
+    （见 :data:`_RE_EXTRA_HITS`）。
     """
     if not desc:
         return 1
     desc = _strip_tags(desc)
+    # 「额外造成 N 次」必须在裸「N 次」之前判断：裸正则会把
+    # 「额外造成2次余震」里的 2 直接当总段数，从而吞掉主攻击那一段。
+    extra = _parse_extra_hits(desc)
+    if extra >= 1:
+        return min(1 + extra, 20)
     text = _drop_non_hit_clauses(desc)
     best = 1
     for m in _RE_HITS_AR.finditer(text):

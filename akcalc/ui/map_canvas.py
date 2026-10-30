@@ -194,7 +194,11 @@ class MapCanvas(tk.Canvas):
         self.fit_cell()          # _clamp_pan 需要新的 cell
         self.redraw()
 
-    # ------------------------------------------------------------ 数据
+    def set_paths(self, paths) -> None:
+        """注入 Paths（用于干员头像加载）。"""
+        self._r.set_paths(paths)
+        self._r.invalidate()
+        self.redraw()
 
     def set_map(self, game_map: Optional[GameMap],
                 analyses: Optional[Sequence[RouteAnalysis]] = None) -> None:
@@ -264,8 +268,6 @@ class MapCanvas(tk.Canvas):
         w, h = self.winfo_width(), self.winfo_height()
         if w < 20 or h < 20:
             w, h = 640, 480
-        # 每次都重算：换图时尺寸可能变了、也可能没变，但都要按新图的
-        # 行列数重新分配格子。fit() 只是几行算术，开销可忽略。
         self._r.fit(w, h)
         im = self._r.render()
         self._photo = ImageTk.PhotoImage(im)
@@ -352,6 +354,32 @@ class MapCanvas(tk.Canvas):
             lines.append("坐标 %s" % _fmt_rc(drow, dcol, gm))
             lines.append("点击查看详情")
             self._tip(x, y, self._r.cell * 0.3, lines, _TIP_ACCENT)
+        # 装置
+        elif self._r.hover is not None and gm.devices:
+            row, col = self._r.hover
+            dev = None
+            for d in gm.devices:
+                if d.row == row and d.col == col and not d.hidden:
+                    dev = d
+                    break
+            if dev is not None:
+                x, y = self._r.tile_xy(row, col)
+                cat_names = {"A": "改路装置", "B": "阻挡装置",
+                             "C": "功能装置", "D": "装饰"}
+                nm = self._r._device_name(dev) or dev.token_key
+                lines = ["%s %s" % (cat_names.get(dev.category, "装置"), nm)]
+                if dev.token_key:
+                    lines.append("键值 %s" % dev.token_key)
+                if dev.direction:
+                    lines.append("朝向 %s" % dev.direction)
+                if dev.block_cnt:
+                    lines.append("阻挡数 %d" % dev.block_cnt)
+                if dev.max_hp:
+                    lines.append("生命 %d" % dev.max_hp)
+                if dev.stack_size > 1:
+                    lines.append("堆叠 ×%d" % dev.stack_size)
+                lines.append("坐标 %s" % coord_label(row, col, gm.height))
+                self._tip(x, y, self._r.cell * 0.3, lines, _TIP_ACCENT)
         # 出怪点
         elif self._r.hover_spawn and self._r.hover_spawn in self._r.spawn_points:
             row, col = self._r.hover_spawn

@@ -169,7 +169,8 @@ class PlaybackBar(tk.Frame):
     """播放控制条。"""
 
     def __init__(self, master, on_time: Optional[Callable[[float], None]] = None,
-                 on_state: Optional[Callable[[bool], None]] = None, **kw):
+                 on_state: Optional[Callable[[bool], None]] = None,
+                 show_progress: bool = True, **kw):
         super().__init__(master, background=BG_PANEL, highlightthickness=1,
                          highlightbackground=DIVIDER, **kw)
         self.state = PlaybackState()
@@ -177,6 +178,7 @@ class PlaybackBar(tk.Frame):
         self.on_state = on_state
         self._after_id = None
         self._dragging = False
+        self._show_progress = show_progress
         self._build()
         harmonize(self, BG_PANEL)
 
@@ -239,16 +241,19 @@ class PlaybackBar(tk.Frame):
                                       font=(FONT_UI, FS_SMALL))
         self.cmb_speed.pack(side="left")
 
-        # 进度条
-        pwrap = tk.Frame(self, background=BG_PANEL)
-        pwrap.pack(fill="x", padx=PAD_M, pady=(0, PAD_S))
-        self.progress = tk.Canvas(pwrap, height=18, background=BG_INPUT,
-                                  highlightthickness=0, cursor="hand2")
-        self.progress.pack(fill="x")
-        self.progress.bind("<Button-1>", self._on_progress_click)
-        self.progress.bind("<B1-Motion>", self._on_progress_drag)
-        self.progress.bind("<ButtonRelease-1>", self._on_progress_release)
-        self.progress.bind("<Configure>", lambda e: self._draw_progress())
+        # 进度条（可选：沙盘改用粗轴调节，不需要进度条）
+        if self._show_progress:
+            pwrap = tk.Frame(self, background=BG_PANEL)
+            pwrap.pack(fill="x", padx=PAD_M, pady=(0, PAD_S))
+            self.progress = tk.Canvas(pwrap, height=18, background=BG_INPUT,
+                                      highlightthickness=0, cursor="hand2")
+            self.progress.pack(fill="x")
+            self.progress.bind("<Button-1>", self._on_progress_click)
+            self.progress.bind("<B1-Motion>", self._on_progress_drag)
+            self.progress.bind("<ButtonRelease-1>", self._on_progress_release)
+            self.progress.bind("<Configure>", lambda e: self._draw_progress())
+        else:
+            self.progress = None
 
     # ---------------------------------------------------------- 对外
 
@@ -375,6 +380,8 @@ class PlaybackBar(tk.Frame):
         self.state.set_speed(sp)
 
     def _draw_progress(self) -> None:
+        if not self._show_progress or self.progress is None:
+            return
         c = self.progress
         c.delete("all")
         w = c.winfo_width() or 200

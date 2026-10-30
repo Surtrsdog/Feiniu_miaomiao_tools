@@ -64,6 +64,7 @@ from ..core.models import GameMap
 from ..core.sandbox import Sandbox
 from ..core.sandbox_track import (CoarseTrack, Deployment, SkillCycle,
                                   SP_ATTACK, SP_AUTO, SP_DEFENSE, SP_NONE,
+                                  TRIG_AUTO, TRIG_MANUAL, TRIG_PASSIVE,
                                   sp_boost_of_text)
 from ..core.skills import plain
 from ..core.timeline import fill_names, parse_timeline
@@ -212,24 +213,34 @@ class SandboxPanel(tk.Frame):
 
         self.canvas = MapCanvas(left)
         self.canvas.pack(fill="both", expand=True, pady=(PAD_S, 0))
+        self.canvas.set_paths(self.app.paths)  # B5: 注入路径以加载干员头像
         self.canvas.on_cell_click = self._on_cell_click
         self.canvas.on_cell_right_click = self._on_cell_right_click
         self.canvas.on_object_hover = self._on_object_hover
         self.canvas.on_enemy_click = self._on_enemy_click
 
-        self.playback = PlaybackBar(left, on_time=self._on_playback_time)
+        self.playback = PlaybackBar(left, on_time=self._on_playback_time,
+                                    show_progress=False)
         self.playback.pack(fill="x", pady=(PAD_XS, 0))
 
         self._build_track(left)
 
-        right = tk.Frame(body, background=BG_PANEL, width=366,
+        right = tk.Frame(body, background=BG_PANEL, width=420,
                          highlightthickness=1, highlightbackground=DIVIDER)
         right.pack(side="right", fill="y")
         right.pack_propagate(False)
 
-        self._build_picker(right)
-        self._build_picked(right)
-        self._build_events(right)
+        # 双竖栏：左栏放干员选择+已选择，右栏放本关出怪
+        col_left = tk.Frame(right, background=BG_PANEL, width=210)
+        col_left.pack(side="left", fill="y")
+        col_left.pack_propagate(False)
+        col_right = tk.Frame(right, background=BG_PANEL, width=210)
+        col_right.pack(side="right", fill="y")
+        col_right.pack_propagate(False)
+
+        self._build_picker(col_left)
+        self._build_picked(col_left)
+        self._build_events(col_right)
         self._build_footer(right)
 
         # Ctrl+Z / Ctrl+Y：办公软件式撤销重做。
@@ -449,7 +460,7 @@ class SandboxPanel(tk.Frame):
         ent.bind("<KeyRelease>", lambda e: self._fill_picker())
 
         self.op_canvas, self.op_inner, self._op_win = self._scrolled(
-            parent, height=116)
+            parent, height=100, expand=True)
 
     def _build_picked(self, parent) -> None:
         head = tk.Frame(parent, background=BG_PANEL)
@@ -463,13 +474,13 @@ class SandboxPanel(tk.Frame):
         self.lbl_pending.pack(side="right")
 
         self.lbl_pick_hint = tk.Label(
-            parent, text="右键已选择列表里的干员 → 再右键地图可部署格即可落位",
+            parent, text="右键干员 → 再右键地图落位",
             background=BG_PANEL, foreground=FG_DIM, font=(FONT_UI, FS_MICRO),
-            anchor="w", justify="left", wraplength=338)
+            anchor="w", justify="left", wraplength=190)
         self.lbl_pick_hint.pack(fill="x", padx=PAD_M, pady=(0, PAD_XS))
 
         self.pick_canvas, self.pick_inner, self._pick_win = self._scrolled(
-            parent, height=104)
+            parent, height=90, expand=True)
 
     def _toggle_harmless(self) -> None:
         """切换「撇除无害单位」后重建出怪列表。
@@ -560,7 +571,7 @@ class SandboxPanel(tk.Frame):
         self.lbl_hint = tk.Label(parent, text="先选关卡并载入",
                                  background=BG_PANEL, foreground=FG_DIM,
                                  font=(FONT_UI, FS_SMALL), anchor="w",
-                                 justify="left", wraplength=338)
+                                 justify="left", wraplength=190)
         self.lbl_hint.pack(fill="x", padx=PAD_M, pady=(0, PAD_XS))
 
         self.ev_canvas, self.ev_inner, self._ev_win = self._scrolled(
@@ -586,7 +597,7 @@ class SandboxPanel(tk.Frame):
         cv.bind("<Configure>",
                 lambda e, c=cv, w=win: c.itemconfigure(w, width=e.width))
         cv.bind("<MouseWheel>",
-                lambda e, c=cv: c.yview_scroll(int(-e.delta / 120), "units"))
+                lambda e, c=cv: c.yview_scroll(-int(e.delta / 120), "units"))
         return cv, inner, win
 
     def _build_footer(self, parent) -> None:
@@ -1051,8 +1062,12 @@ class SandboxPanel(tk.Frame):
         sb = self.sandbox
         if sb is None:
             return
+        hide_harmless = (getattr(self, "var_hide_harmless", None) is not None
+                         and self.var_hide_harmless.get())
         pos = []
         for ev in sb.live_events():
+            if hide_harmless and getattr(ev, "harmless", False):
+                continue
             t0 = float(getattr(ev, "time", 0.0))
             if t0 > seconds:
                 continue
@@ -1060,6 +1075,8 @@ class SandboxPanel(tk.Frame):
             if sp is None:
                 continue
             row, col = float(sp[0]), float(sp[1])
+            # 检查是否被干员阻挡
+            blocked_info = sb.enemy_flags(ev, seconds) if hasattr(sb, 'enemy_flags') else {}
             pos.append({
                 "row": row, "col": col,
                 "row_i": int(round(row)), "col_i": int(round(col)),
@@ -1073,6 +1090,7 @@ class SandboxPanel(tk.Frame):
                 "fraction": 0.0,
                 "elapsed": seconds - t0,
                 "number": 0,
+                "blocked": bool(blocked_info.get("blocked", False)),
             })
         self.canvas.set_frame(pos)
 
@@ -1438,6 +1456,13 @@ class SandboxPanel(tk.Frame):
             return
         item = self._picked[self._pending_idx]
         if item.get("is_box"):
+            # 箱子不能放在高台
+            gm = sb.game_map
+            tile = gm.tile_at(r, c) if gm else None
+            if tile is not None and str(getattr(tile, "height_type", "")).upper() == "HIGHLAND":
+                self.lbl_detail.configure(
+                    text="不能在高台放箱子 (%d,%d)" % (r, c))
+                return
             # 箱子走另一套判定：不看「能不能部署」，看「会不会堵死蓝门」
             ok, why = sb.box_check(r, c)
             if not ok:
@@ -1457,7 +1482,12 @@ class SandboxPanel(tk.Frame):
                      % (r, c))
             self._after_change()
             return
-        ok, why = sb.deploy_check(r, c, item["is_ranged"])
+        # 费用和时刻必须一起交给 deploy_check：不传 cost 时它按 0 处理、
+        # 直接跳过费用校验，于是出现「预检说可以 -> deploy() 内扣费失败 ->
+        # 界面弹一句跟真实原因无关的错」。人数上限同理，它按 now 算在场人数。
+        ok, why = sb.deploy_check(
+            r, c, item["is_ranged"],
+            cost=float(item.get("cost", 0) or 0), now=self._now)
         if not ok:
             self.lbl_detail.configure(
                 text="不能放在 (%d,%d)：%s" % (r, c, why))
@@ -1477,7 +1507,11 @@ class SandboxPanel(tk.Frame):
             cost=int(item.get("cost", 0) or 0),
             sp_boost=float(item.get("sp_boost", 0.0) or 0.0))
         if not sb.deploy(r, c, dep):
-            self.lbl_detail.configure(text="(%d,%d) 已经有干员了" % (r, c))
+            # 用 core 写下的真实原因。以前这里硬编码「已经有干员了」，
+            # 费用不够也报占位冲突，用户照着提示怎么点都放不下去。
+            why = str(getattr(sb, "last_deploy_error", "") or "")
+            self.lbl_detail.configure(
+                text="不能放在 (%d,%d)：%s" % (r, c, why or "部署失败"))
             return
         sb.push_history()
         self._pending_idx = None
@@ -1599,8 +1633,22 @@ class SandboxPanel(tk.Frame):
         self._after_change()
 
     def _set_facing(self, piece, facing: str) -> None:
+        """B4 §7: 改朝向时重算范围（不再清空为 None）。"""
         piece.facing = facing
-        piece.range_cells = None
+        # 用真实范围重算（B4）；取不到时保留旧值或 None（兜底 3×3）
+        rid = getattr(piece, "range_id", None)
+        if rid:
+            try:
+                from ..core.ranges import get_cells as _gc
+                cells = _gc(rid, facing)
+                if cells:
+                    piece.range_cells = list(cells)
+                else:
+                    piece.range_cells = None
+            except Exception:
+                piece.range_cells = None
+        else:
+            piece.range_cells = None
         sb = self.sandbox
         if sb is not None:
             sb.push_history()
@@ -1647,9 +1695,15 @@ class SandboxPanel(tk.Frame):
             sb.push_history()
             self.lbl_detail.configure(text="已移除 (%d,%d) 的箱子" % (r, c))
         else:
+            # 箱子不能放在高台
+            gm = sb.game_map
+            tile = gm.tile_at(r, c) if gm else None
+            if tile is not None and str(getattr(tile, "height_type", "")).upper() == "HIGHLAND":
+                self.lbl_detail.configure(
+                    text="不能在高台放箱子 (%d,%d)" % (r, c))
+                return
             ok, why = sb.box_check(r, c)
             if not ok:
-                # 用户的硬要求：箱子不能堵死通往蓝门的路线
                 self.lbl_detail.configure(
                     text="不能放在 (%d,%d)：%s" % (r, c, why))
                 return
@@ -2165,10 +2219,10 @@ class SandboxPanel(tk.Frame):
         return None
 
     def _range_cells(self, ops: Optional[dict] = None) -> set:
-        """选中干员的攻击范围格。
+        """选中干员的攻击范围格（B4 §7：真实范围替代 3×3 兜底）。
 
         只对「选中」的那一枚算——全部常驻算一遍既没必要也拖慢重绘。
-        取不到干员自身范围时给一个近战 3x3 兜底。
+        取不到干员自身范围时给一个近战 3×3 兜底。
         """
         p = self._selected_op
         if not p:
@@ -2178,9 +2232,22 @@ class SandboxPanel(tk.Frame):
         piece = ops.get(p)
         if piece is None:
             return set()
+        # B4: 优先用已计算好的 range_cells
         cells = getattr(piece, "range_cells", None)
         if cells:
             return set(cells)
+        # B4: 尝试从 range_id 实时算
+        rid = getattr(piece, "range_id", None)
+        if rid:
+            try:
+                from ..core.ranges import get_cells as _gc
+                facing = getattr(piece, "facing", "RIGHT") or "RIGHT"
+                c = _gc(rid, facing)
+                if c:
+                    return c
+            except Exception:
+                pass
+        # 兜底：3×3 近战范围
         r0, c0 = p
         gm = self.game_map
         out = set()
@@ -2201,12 +2268,34 @@ class SandboxPanel(tk.Frame):
         total = self._track_total()
         cycles: Dict[int, List[tuple]] = {}
         for dep in sb.track.all():
+            # 只有**自动触发**的技能才画推演循环。
+            #
+            # ``sim.cycles()`` 算的是「SP 一满就立刻开」，对手动技能来说
+            # 那是「最早可以开」而不是「真的开了」——以前不区分，轴上每个
+            # 手动技能都出现一串实心技能段，看起来像技能在自动施放。
+            # 手动技能的实际开启时刻由 ``dep.skill_uses`` 决定（用户右键
+            # 「开启技能」时记的），画成标记由 canvas 负责。
+            if not dep.skill.is_auto_trigger:
+                cycles[dep.uid] = []
+                continue
+            # 自动触发「一直循环到该干员撤退」：算到撤退时刻为止，
+            # 不能拿轴总长当终点——那样撤退之后还会继续长出一串技能段。
+            end = total
+            if dep.retreat_time is not None:
+                end = min(end, float(dep.retreat_time))
             try:
-                raw = sb.skill_sim.cycles(dep.skill, total, dep.deploy_time,
-                                          boost=float(dep.sp_boost or 0.0))
+                sim = sb._op_skill_sim(dep.op_id)
+                raw = sim.cycles(dep.skill, end, dep.deploy_time,
+                                 boost=float(dep.sp_boost or 0.0))
             except Exception:
                 raw = []
-            cycles[dep.uid] = [(a, b) for (a, _x, b) in raw]
+            segs = []
+            for (a, _x, b) in raw:
+                if a > end:
+                    break
+                # 撤退点落在技能持续期内时截断，不能让它画到撤退之后。
+                segs.append((a, min(b, end)))
+            cycles[dep.uid] = segs
         self.track_canvas.set_track(sb.track, total=total, cycles=cycles,
                                     keep_view=True)
         n = len(sb.track.deployments)
@@ -2215,30 +2304,30 @@ class SandboxPanel(tk.Frame):
         self._draw_buff_axis()
 
     def _track_total(self) -> float:
-        """粗轴总长：取「时间轴总时长」与「最后一个动作」的较大者。
+        """沙盘播放总长：由 solve_end() 的结束机制决定。
 
-        必须覆盖**走完全程**，不能只用 ``timeline.duration`` —— 那只是最后
-        一只敌人**出场**的时刻。实测几乎所有关都短：``main_08-04`` 出怪到
-        163s 但最后一只 193s 才到蓝门，``hard_08-04`` 176s vs 274s（平民
-        还罚站 270 秒），``act1multi_football`` 80s vs 357s。按出场时刻收尾
-        的话动画在敌人刚抬脚时就结束，看起来像「站着没动」。
-
-        口径与寻路面板的 ``Timeline.span(analyses)`` 保持一致（那边本来就
-        是这么算的），额外再算上**出场罚站**——角兽的【休憩】不在路线的
-        ``total_time`` 里，``arrival_time`` 才是含它的历时。
+        不再使用 arrival_time / Timeline.span / CoarseTrack.span
+        （那些是路线分析口径，忽略干员阻挡）。
+        沙盘口径：考虑阻挡/死锁/vanish 的实际收尾时刻。
         """
-        dur = 0.0
-        if self.timeline is not None:
-            dur = float(getattr(self.timeline, "duration", 0.0) or 0.0)
-        if self.sandbox is not None:
-            dur = max(dur, self.sandbox.track.span())
-            for ev in (self.timeline.events if self.timeline else []):
-                # arrival_time 返回的历时**已含**出场罚站，不用再加 head
-                _arr = self.sandbox.arrival_time(ev)
-                if _arr is None:
-                    continue
-                dur = max(dur, float(getattr(ev, "time", 0.0) or 0.0) + _arr)
-        return max(60.0, dur)
+        if self.sandbox is None:
+            return 60.0
+        try:
+            return max(60.0, self.sandbox.solve_end()["end_time"])
+        except Exception:
+            # 降级：回退到旧算法，保证不崩溃
+            dur = 0.0
+            if self.timeline is not None:
+                dur = float(getattr(self.timeline, "duration", 0.0) or 0.0)
+            if self.sandbox is not None:
+                dur = max(dur, self.sandbox.track.span())
+                for ev in (self.timeline.events if self.timeline else []):
+                    _arr = self.sandbox.arrival_time(ev)
+                    if _arr is None:
+                        continue
+                    dur = max(dur, float(getattr(ev, "time", 0.0)
+                                          or 0.0) + _arr)
+            return max(60.0, dur)
 
     def _draw_buff_axis(self) -> None:
         """画 buff 轴：一段一段的减速区块。"""
@@ -2612,6 +2701,17 @@ def _cycle_of(skill, interval: float = 1.0) -> SkillCycle:
     cyc = SkillCycle()
     if skill is None:
         return cyc
+    # ---- 触发方式（谁决定「开」）----
+    # 与恢复类型（SP 怎么涨）是两件事：自然回复 + 手动触发（真银斩）
+    # 和 攻击回复 + 自动触发（二连射）都真实存在。
+    trig = str(getattr(skill, "trigger_type", "") or "")
+    if "自动" in trig:
+        cyc.trigger = TRIG_AUTO
+    elif "被动" in trig:
+        cyc.trigger = TRIG_PASSIVE
+    elif "手动" in trig:
+        cyc.trigger = TRIG_MANUAL
+    # 空字符串（PRTS 没抓到）时保持默认 MANUAL，不猜成自动。
     tt = str(getattr(skill, "tree_type", "") or "")
     if "攻击" in tt:
         cyc.recover = SP_ATTACK
@@ -2619,6 +2719,7 @@ def _cycle_of(skill, interval: float = 1.0) -> SkillCycle:
         cyc.recover = SP_DEFENSE
     elif "被动" in tt:
         cyc.recover = SP_NONE
+        cyc.trigger = TRIG_PASSIVE
     elif "自动" in tt:
         cyc.recover = SP_AUTO
     else:
@@ -2639,7 +2740,12 @@ def _cycle_of(skill, interval: float = 1.0) -> SkillCycle:
         cyc.init_sp = max(0.0, float(getattr(lv, "initial", 0.0) or 0.0))
         cyc.duration = max(0.0, float(getattr(lv, "duration", 0.0) or 0.0))
     if cyc.sp_cost <= 0:
+        # 没有技力消耗 = 不存在「攒满再开」的过程。
         cyc.recover = SP_NONE
+        if cyc.trigger != TRIG_PASSIVE:
+            # PRTS 说「手动/自动触发」但 spCost=0：视为落地即生效，
+            # 否则轴上会出现一个永远开不了的技能段。
+            cyc.trigger = TRIG_PASSIVE
     cyc.infer_attack = (cyc.recover == SP_ATTACK)
     return cyc
 

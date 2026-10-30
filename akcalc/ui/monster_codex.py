@@ -15,6 +15,7 @@ import tkinter as tk
 from typing import List
 
 from ..core import enemy_codex as EC
+from ..core import enemy_timing as ETIM
 from ..core import enemy_icons as EI
 from ..core import enemy_skills as ES
 from . import skill_render as ESR
@@ -168,6 +169,8 @@ class MonsterCodexDialog(tk.Toplevel):
                                 "到设置里更新一次数据即可。",
                      background=BG, foreground=FG_DIM,
                      font=(FONT_UI, FS_BODY), justify="left").pack(anchor="w")
+            # 抬手表独立于敌库（随包分发），敌库没下载时也可能有数据
+            self._timing_card(body.inner)
             # 数据缺了也让人记事：本地没数据本身就是要记下来的事
             self._anno_card(body.inner)
             return
@@ -194,6 +197,7 @@ class MonsterCodexDialog(tk.Toplevel):
 
         stats = ["%s  %s" % (k, v) for k, v in e["stats"]]
         self._card(body.inner, "基础面板", stats, columns=2)
+        self._timing_card(body.inner)
 
         if e.get("immunes"):
             self._card(body.inner, "免疫", ["、".join(e["immunes"])], color=ACCENT)
@@ -214,7 +218,7 @@ class MonsterCodexDialog(tk.Toplevel):
         if prts or hb_named or codes:
             self._skill_code_card(body.inner, codes, secs, prts)
         elif e.get("skills"):
-            self._card(body.inner, "技能（解包摘要）", e["skills"], wrap=True)
+            self._card(body.inner, "技能（数据摘要）", e["skills"], wrap=True)
 
         # ------------------------------------------------------ 代码实现
         # 用户的问题很具体：「赤刃明霄陈的龙在代码上是怎么实现的」
@@ -296,7 +300,7 @@ class MonsterCodexDialog(tk.Toplevel):
                        "到设置里更新一次数据即可显示天赋/能力描写。")
             else:
                 msg = ("敌人档案里没有这只怪的天赋/能力描写，"
-                       "解包数据里也没有 talentBlackboard 参数。")
+                       "数据里也没有 talentBlackboard 参数。")
             self._card(master, "天赋 / 能力", [msg], wrap=True)
             return
         if secs_plain:
@@ -334,7 +338,7 @@ class MonsterCodexDialog(tk.Toplevel):
         card = Card(master, title="代码实现", accent=ACCENT)
         card.pack(fill="x", pady=(0, PAD_S))
         tk.Label(card.head_right,
-                 text="解包 prefabKey / blackboard",
+                 text="prefabKey / blackboard",
                  background=CARD_HEAD, foreground=FG_DIM,
                  font=(FONT_UI, FS_MICRO)).pack(side="left",
                                                 padx=(0, PAD_S))
@@ -379,8 +383,8 @@ class MonsterCodexDialog(tk.Toplevel):
                     pretty = str(code)
                 lines = pretty.split("\n")
                 if len(lines) > 40:
-                    lines = lines[:40] + ["…（已截断，点「查看原代码」看全文）"]
-                btn = tk.Button(box, text="▾ 解包原文（%d 行）" % len(lines),
+                    lines = lines[:40] + ["…（已截断）"]
+                btn = tk.Button(box, text="▾ 原文（%d 行）" % len(lines),
                                 relief="flat", background=BG_DEEP,
                                 foreground=ACCENT, activebackground=BG_PANEL,
                                 activeforeground=ACCENT,
@@ -392,7 +396,7 @@ class MonsterCodexDialog(tk.Toplevel):
                 def _toggle(h=holder, b=btn, ls=lines):      # noqa: ANN001
                     if h.winfo_ismapped():
                         h.pack_forget()
-                        b.config(text="▾ 解包原文（%d 行）" % len(ls))
+                        b.config(text="▾ 原文（%d 行）" % len(ls))
                     else:
                         for w in h.winfo_children():
                             w.destroy()
@@ -436,10 +440,80 @@ class MonsterCodexDialog(tk.Toplevel):
         tags = hb.tags(self.enemy_id) if hb.loaded else []
         if tags:
             items.append(("标签", "、".join(tags)))
+        # 抬手不放在这里：它已经有独立的「抬手（攻击前摇）」卡，
+        # 那张卡还能列出 Attack_A / Combat 各自的秒数。放在「分类」里
+        # 只会让同一数字出现两遍。
         if not items:
             return
         self._card(master, "分类", ["%s  %s" % (k, v) for k, v in items],
                    columns=2)
+
+    # ---------------------------------------------------------------- 抬手
+
+    def _timing_card(self, master) -> None:
+        """抬手（攻击前摇）卡：帧 + 秒 + 30/60/120 三档帧号。
+
+        数据源是解包的 ``bakemuzzledata``——那里记录每次攻击动画在
+        第几秒触发 OnAttack。解包是按 **30 fps** 烘焙的，``eventTime``
+        本质就是「帧号 / 30」，所以帧数不是估算出来的近似值，而是
+        还原原始帧号（实测 1857 条，换算后再换回来误差 < 0.001 帧）。
+
+        三档帧号的含义（用户 2024-10 明确要求的口径）：
+
+        * **30** —— 游戏逻辑帧率，帧号是「真帧」，数据原生单位
+        * **60 / 120** —— 高刷设备的**插值帧**。明日方舟本质是 30 帧
+          游戏，逻辑固定 30 步/秒；高刷下渲染在两帧/四帧之间补中间
+          姿态。同一时长帧号成比例：14 帧@30 == 28 帧@60 == 56 帧@120
+
+        没数据的敌人也画卡（早期版本静默不画，用户以为功能坏了）：
+        15% 的敌人不在 bake 里——装置（源石祭坛）、召唤物、剧情单位
+        本身没有攻击动画。明确写「未收录」+ 原因，比消失好。
+        """
+        try:
+            paths = getattr(self.app, "paths", None)
+            hit = ETIM.get(self.enemy_id, paths)
+        except Exception:
+            hit = None
+
+        if not hit:
+            # 明说不收录的原因，而不是把卡藏掉
+            reason = ("攻击动画表未收录该单位"
+                      "（多为装置 / 召唤物 / 剧情单位，没有攻击动画）")
+            if not self._entry:
+                reason = "敌人库尚未下载，无法判断；抬手表未收录"
+            self._card(master, "抬手（攻击前摇）",
+                       ["未收录", reason], wrap=True)
+            return
+
+        a = hit.get("a")
+        if not isinstance(a, (int, float)):
+            self._card(master, "抬手（攻击前摇）",
+                       ["未收录", "数据里没有攻击事件"], wrap=True)
+            return
+
+        fr = ETIM.sec_to_frames(a)
+        tab = ETIM.at_fps_table(fr) or {}
+        lines = ["抬手 %d 帧　（%.3f 秒）" % (fr, a)]
+        # 三档对照：30 是逻辑真帧，60/120 是插值帧
+        if tab:
+            lines.append("@30fps %d 帧 ｜ @60fps %s 帧 ｜ @120fps %s 帧"
+                         % (tab.get("30"), tab.get("60"), tab.get("120")))
+        allv = hit.get("all") or {}
+        if len(allv) > 1:
+            parts = []
+            for k in sorted(allv):
+                v = allv[k]
+                if isinstance(v, (int, float)):
+                    parts.append("%s %d 帧" % (k, ETIM.sec_to_frames(v)))
+            lines.append("各动作：%s" % "  ".join(parts))
+        elif hit.get("anim") and hit.get("anim") != "Attack":
+            lines.append("动作：%s" % hit["anim"])
+        if hit.get("skill_only"):
+            lines.append("（普攻动画缺失，事件取自技能动作）")
+        lines.append("游戏逻辑 %d 帧/秒；60/120 为插值帧，时长与 30 帧一致"
+                     % ETIM.FPS)
+
+        self._card(master, "抬手（攻击前摇）", lines, wrap=True)
 
     # ---------------------------------------------------------------- 技能
 
@@ -476,22 +550,17 @@ class MonsterCodexDialog(tk.Toplevel):
                      foreground=FG_DIM, font=(FONT_UI, FS_MICRO)).pack(
                 side="left", padx=(0, PAD_S))
 
-        btn = tk.Button(card.head_right, text="查看原代码", relief="flat",
-                        background=BG_DEEP, foreground=ACCENT,
-                        activebackground=BG_PANEL, activeforeground=ACCENT,
-                        font=(FONT_UI, FS_MICRO), highlightthickness=1,
-                        highlightbackground=BORDER, cursor="hand2",
-                        padx=8, pady=0, command=self._open_skill_json)
-        btn.pack(side="right")
-
         blocks = ES.build_blocks(self.enemy_id, sections, codes, prts)
         ESR.render_skills(card.body, blocks, ES.env(self.app), wrap=470,
                           max_bb=6)
 
-        unpack = ESR.unpack_lines(codes)
-        if unpack:
-            ESR.collapsible(card.body, "解包数值（enemyData.skills 原样）",
-                            unpack, wrap=460, note=ESR.UNPACK_NOTE)
+        # 字段对照说明（不涉及原始数据，只告诉用户圆点对应哪个字段）
+        tk.Label(card.body,
+                 text="字段对照：initCooldown = 初始，cooldown = 消耗，"
+                      "spCost = 技力消耗（多数敌人技能恒为 0）",
+                 background=CARD, foreground=FG_DIM,
+                 font=(FONT_UI, FS_MICRO), anchor="w", justify="left",
+                 wraplength=460).pack(fill="x", padx=PAD_M, pady=(PAD_S, 0))
 
         if not prts:
             # 说明为什么名字右边没有 PRTS 标记：用户会拿这里的字去和

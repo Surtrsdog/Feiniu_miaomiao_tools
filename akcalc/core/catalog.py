@@ -21,10 +21,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 #: 顶层分类的展示顺序与中文名。
 #: 顺序与命名对齐 PRTS「关卡一览」与 map.ark-nights.com 的分区方式，
-#: 玩家找图时的心智模型就是「主题曲 / 插曲 / 别传」，而不是活动 ID。
+#: 玩家找图时的心智模型就是「主题曲 / 插曲 / 别传 / Side Story」，而不是活动 ID。
 CATEGORY_ORDER = [
     ("main", "主题曲"),
     ("sidestory", "插曲"),
+    ("interlude", "Side Story"),
     ("branchline", "别传"),
     ("activity", "限时活动"),
     ("weekly", "资源收集"),
@@ -43,12 +44,17 @@ CATEGORY_ORDER = [
 #: 根本没有肉鸽关卡，界面就会一直没有「集成战略」分类。
 #:   v2: 加入集成战略（肉鸽）
 #:   v3: 肉鸽关卡加 node_type（作战/紧急作战/险路恶敌…），用于三层筛选
-CATALOG_SCHEMA = 3
+#:   v4: 修复插曲分类——permanent_sidestory_* 分区名纳入插曲判定
+#:   v5: 拆分插曲与 Side Story——插曲=15/16/17章(MAINLINE_ACTIVITY)，
+#:       Side Story=permanent_sidestory_* 复刻活动，单独成一类
+#:   v6: hard_15~17 归插曲；#f#/#s 难度变体不再入目录（同一张图）
+CATALOG_SCHEMA = 6
 
 #: 分类 -> 一句说明，显示在分类主菜单的卡片上
 CATEGORY_DESC = {
     "main": "第 0~14 章主线剧情，按章节推进",
-    "sidestory": "与主线剧情强关联的 Side Story",
+    "sidestory": "第 15/16/17 章：离解复合 / 反常光谱 / 相变临界",
+    "interlude": "Side Story 活动复刻（大骑士领 / 雪山大典 / 万国峰会等）",
     "branchline": "独立故事线的活动复刻（别传）",
     "activity": "限时活动关卡，含当期与往期",
     "weekly": "资源收集：经验、龙门币、芯片、技巧概要",
@@ -344,19 +350,26 @@ def classify(stage_type: str, stage_id: str, zone_id: str,
     # id 前缀比 zone.type 更贴近玩家认知：
     #   hard_* 是主线高难（H 系列），zone 却挂在 MAINLINE 章节下。
     #   按需求「磨难去掉」：H 系列直接并入主题曲，不再单独成卡。
+    #   但 hard_15-* 属于第 15 章（离解复合），应归插曲。
     # 注意 main_* 不能一律当主题曲：第 15/16/17 章的 id 也是 main_NN-*，
     # 但它们的 zone 是 MAINLINE_ACTIVITY（离解复合 / 反常光谱 /
     # 相变临界这三个「插曲」章节），必须交给下面的 zone.type 判断。
     if head == "hard":
+        # hard_15-* ~ hard_17-* 属于插曲章节
+        if zt in ("MAINLINE_ACTIVITY", "MAINLINE_RETRO"):
+            return "sidestory"
         return "main"
     if head == "crisis":
         return "crisis"
     if head == "tower":
         return "tower"
-    # 第 15/16/17 章的关卡 id 同样是 main_NN-*，但 zone 被官方挂在
-    # actNmainss_zone 下（zone.type = MAINLINE_ACTIVITY）。这些仍然是
-    # 主线章节，之前一律当插曲，导致主题曲里看不到第十五章以后的内容。
+    # 第 15/16/17 章的关卡 id 是 main_15-* / main_16-* / main_17-*，
+    # zone.type = MAINLINE_ACTIVITY。用户要求这些归为「插曲」(sidestory)，
+    # 不能和 0~14 章混在主题曲里。
     if head == "main":
+        # 先检查 zone type：MAINLINE_ACTIVITY / MAINLINE_RETRO -> 插曲
+        if zt in ("MAINLINE_ACTIVITY", "MAINLINE_RETRO"):
+            return "sidestory"
         return "main"
 
     if zt in _ZONE_TYPE_CATEGORY:
@@ -594,27 +607,31 @@ def _add_roguelike_stages(cat: "StageCatalog",
 
 
 def build_permanent_names(zone_table: dict):
-    """收集「插曲 / 别传」永久分区的名字集合。
+    """收集「插曲 / Side Story / 别传」永久分区的名字集合。
 
-    游戏里活动结束后会进常驻，官方为此准备了 ``permanent_main_*``
-    （插曲，与主线剧情关联）和 ``permanent_sub_*``（别传，独立故事线）
-    两组分区。但这些分区本身**不挂任何关卡**，真实关卡仍在
-    ``actXXXX_zoneN`` 上，两者靠 ``zoneNameSecond`` 同名对应
-    （实测 20 个别传分区名 100% 命中）。
+    游戏里活动结束后会进常驻，官方准备了几组永久分区：
+    - ``permanent_main_*``（离解复合/反常光谱/相变临界 = 第15/16/17章 = 插曲）
+    - ``permanent_sidestory_*``（84 个 Side Story 复刻分区，如大骑士领/雪山大典）
+    - ``permanent_sub_*``（20 个别传分区，如失落旗舰等）
 
-    返回 (插曲名集合, 别传名集合)。
+    这些永久分区本身**不挂任何关卡**，真实关卡仍在 ``actXXXX_zoneN`` 上，
+    两者靠 ``zoneNameSecond`` 同名对应。
+
+    返回 (插曲名集合, Side Story名集合, 别传名集合)。
     """
     zones = (zone_table or {}).get("zones") or {}
-    sidestory, branchline = set(), set()
+    sidestory, interlude, branchline = set(), set(), set()
     for zid, z in zones.items():
         name = (z.get("zoneNameSecond") or "").strip()
         if not name:
             continue
         if zid.startswith("permanent_main"):
             sidestory.add(name)
+        elif zid.startswith("permanent_sidestory"):
+            interlude.add(name)
         elif zid.startswith("permanent_sub"):
             branchline.add(name)
-    return sidestory, branchline
+    return sidestory, interlude, branchline
 
 
 class StageCatalog:
@@ -632,7 +649,7 @@ class StageCatalog:
         cat = cls()
         zones = (zone_table or {}).get("zones") or {}
         stages_raw = (stage_table or {}).get("stages") or {}
-        ss_names, bl_names = build_permanent_names(zone_table)
+        ss_names, il_names, bl_names = build_permanent_names(zone_table)
 
         path_map = {}
         for p in (paths or ()):
@@ -644,6 +661,10 @@ class StageCatalog:
 
         for sid, raw in stages_raw.items():
             if raw.get("isStoryOnly"):
+                continue
+            # 跳过难度变体：#f# = 磨难（硬核），#s = 简单（故事模式）
+            # 它们使用同一张地图，只增加列表噪音。
+            if "#" in sid:
                 continue
             st = Stage(
                 stage_id=sid,
@@ -660,17 +681,25 @@ class StageCatalog:
             st.group_name = (MAINLINE_CHAPTER_NAMES.get(st.zone_id)
                              or _zone_group_name(zone))
             st.sub_name = zone.get("zoneNameSecond") or ""
-            # 活动结束后进常驻的，按 permanent_* 分区名归到插曲/别传。
+            # 活动结束后进常驻的，按 permanent_* 分区名归到对应分类。
             # 注意 main_17-* 这类虽也命中「相变临界」，但它是主题曲正篇，
             # 已在 classify 里按 main_ 前缀归好，这里只处理活动前缀。
+            #
+            # 分类对应：
+            #   permanent_main_*      -> sidestory（插曲 = 15/16/17章）
+            #   permanent_sidestory_* -> interlude（Side Story 复刻活动）
+            #   permanent_sub_*       -> branchline（别传）
             if (st.category == "activity" and st.sub_name
                     and not sid.startswith("main_")):
                 if st.sub_name in bl_names:
                     st.category = "branchline"
+                elif st.sub_name in il_names:
+                    st.category = "interlude"
                 elif st.sub_name in ss_names:
                     st.category = "sidestory"
 
-            if st.category in ("activity", "sidestory", "branchline"):
+            if st.category in ("activity", "sidestory", "interlude",
+                               "branchline"):
                 # 活动类按活动目录分组（act13side -> 一个组）
                 st.group_id = activity_dir(st.zone_id, sid) or st.zone_id
             elif st.category == "main":

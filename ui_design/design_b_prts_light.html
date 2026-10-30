@@ -1,0 +1,212 @@
+﻿<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>方案 B · PRTS 纸张浅色</title><style>:root{--paper:#f5f0e6;--paper2:#fbf8f1;--card:#fffdf8;--ink:#2b2720;--dim:#6f6757;--faint:#9b927e;--line:#e2dac6;--line2:#d5ccb2;--gold:#a8791f;--gold2:#c99b3f;--blue:#3f6fb5;--red:#b5543f;--green:#4e8a5f;--shadow:0 1px 2px rgba(70,60,30,.08),0 8px 24px rgba(70,60,30,.08)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Microsoft YaHei UI","Segoe UI",sans-serif;color:var(--ink);background:var(--paper);
+background-image:linear-gradient(0deg,rgba(160,140,90,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(160,140,90,.04) 1px,transparent 1px);background-size:22px 22px;min-height:100vh}
+.app{max-width:1240px;margin:0 auto;padding:0 28px 60px}
+.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:24px;margin-bottom:24px;padding:12px 18px;background:rgba(251,248,241,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--line2);box-shadow:0 4px 16px rgba(70,60,30,.06)}
+.brand{display:flex;align-items:center;gap:11px}
+.brand .dot{width:30px;height:30px;border-radius:4px;flex:none;background:linear-gradient(135deg,var(--gold2),var(--gold));box-shadow:0 0 0 1px #b58a2e inset;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+.brand b{font-size:16px;letter-spacing:1px}
+.brand small{display:block;color:var(--faint);font-size:11px;margin-top:1px}
+.nav{display:flex;gap:4px;margin-left:6px;border-left:1px solid var(--line);padding-left:16px}
+.nav button{border:0;background:transparent;color:var(--dim);font-size:13.5px;padding:9px 14px;border-radius:6px;cursor:pointer;font-family:inherit;transition:.15s;border-bottom:2px solid transparent}
+.nav button:hover{color:var(--ink);background:rgba(160,140,90,.08)}
+.nav button.active{color:var(--gold);font-weight:700;border-bottom-color:var(--gold);background:rgba(200,155,63,.08)}
+.top-actions{margin-left:auto;display:flex;gap:8px}
+.chipbtn{border:1px solid var(--line2);background:var(--card);color:var(--dim);padding:8px 13px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:inherit}
+.chipbtn:hover{color:var(--gold);border-color:var(--gold2)}
+.page{display:none;animation:fade .25s ease}
+.page.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.hero{margin:10px 0 22px;padding-bottom:18px;border-bottom:2px solid var(--line2);position:relative}
+.hero::after{content:"";position:absolute;left:0;bottom:-2px;width:120px;height:2px;background:var(--gold)}
+.hero .eyebrow{color:var(--gold);font-size:12px;letter-spacing:3px;font-weight:700}
+.hero h1{font-size:32px;margin:8px 0 8px}
+.hero p{color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:4px;box-shadow:var(--shadow)}
+.cardhead{display:flex;align-items:center;gap:10px;padding:15px 20px 0}
+.cardhead .bar{width:4px;height:16px;border-radius:1px;background:var(--gold)}
+.cardhead h3{font-size:15px}
+.cardhead .extra{margin-left:auto;color:var(--faint);font-size:12px}
+.featgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:14px}
+.feat{cursor:pointer;padding:22px 20px 20px;transition:.16s;position:relative}
+.feat:hover{transform:translateY(-3px);border-color:var(--gold2);box-shadow:0 10px 28px rgba(70,60,30,.14)}
+.feat .ico{width:40px;height:40px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:14px;background:linear-gradient(135deg,#f3e8cf,#ead9b4);border:1px solid var(--line2);color:var(--gold)}
+.feat h3{font-size:18px;margin-bottom:8px}
+.feat p{color:var(--dim);font-size:13px;line-height:1.75;min-height:66px}
+.feat .go{margin-top:14px;color:var(--gold);font-size:13px;font-weight:700}
+.indexgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
+.indexcard{padding:16px 16px 14px;cursor:pointer;transition:.14s;border-left:3px solid var(--gold2)}
+.indexcard:hover{border-color:var(--gold2);background:#fffcf2}
+.indexcard h4{font-size:15px;margin-bottom:5px}
+.indexcard p{color:var(--faint);font-size:12.5px;line-height:1.6}
+.split{display:grid;grid-template-columns:300px 1fr;gap:16px;margin-top:14px;align-items:start}
+.listbox{padding:14px}
+.search{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:5px;background:#fff;border:1px solid var(--line2);margin-bottom:12px}
+.search input{flex:1;background:transparent;border:0;outline:0;color:var(--ink);font-family:inherit;font-size:13px}
+.filters{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.fchip{font-size:11.5px;color:var(--dim);padding:5px 10px;border-radius:4px;background:#fff;border:1px solid var(--line);cursor:pointer}
+.fchip.on{color:#fff;background:var(--gold);border-color:var(--gold)}
+.list{display:flex;flex-direction:column;gap:3px;max-height:560px;overflow:auto}
+.list .item{padding:8px 11px;border-radius:4px;color:var(--dim);font-size:13px;cursor:pointer;border-left:3px solid transparent}
+.list .item:hover{background:#f3ecdb;color:var(--ink)}
+.list .item.sel{background:#f3ecdb;color:var(--ink);border-left-color:var(--gold);font-weight:700}
+.count{margin-top:10px;color:var(--faint);font-size:11.5px;font-family:Consolas,monospace}
+.detail{display:flex;flex-direction:column;gap:14px}
+.headcard{display:flex;gap:18px;padding:20px}
+.avatar{width:120px;height:120px;border-radius:6px;flex:none;display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:700;color:#8a6d2b;background:linear-gradient(135deg,#f3e8cf,#e9d9b5);border:1px solid var(--line2)}
+.meta h2{font-size:24px;margin-bottom:4px}
+.meta .stars{color:var(--gold);font-size:15px;letter-spacing:3px;margin-bottom:10px}
+.tags{display:flex;gap:6px;flex-wrap:wrap}
+.tag{font-size:11.5px;padding:4px 10px;border-radius:4px;color:var(--gold);background:#f7efdc;border:1px solid var(--line2)}
+.tag.alt{color:var(--blue);background:#e8eff8;border-color:#c9d8ee}
+.statgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:16px 20px}
+.stat{background:#faf6ea;border:1px solid var(--line);border-radius:4px;padding:12px 14px}
+.stat small{display:block;color:var(--faint);font-size:11px;margin-bottom:6px}
+.stat b{font-family:Consolas,monospace;font-size:17px}
+.stat b.hl{color:var(--gold)}
+.block{padding:16px 20px}
+.block p{color:var(--dim);font-size:13.5px;line-height:1.85}
+.skillrow{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px dashed var(--line)}
+.skillrow:last-child{border-bottom:0}
+.skillrow .skname{width:150px;flex:none;font-weight:700;font-size:13.5px;color:var(--blue)}
+.skillrow .skdesc{color:var(--dim);font-size:12.5px;line-height:1.7;flex:1}
+.dpsgrid{display:grid;grid-template-columns:330px 1fr;gap:16px;margin-top:14px;align-items:start}
+.form{display:flex;flex-direction:column;gap:12px;padding:18px}
+.field label{display:block;color:var(--faint);font-size:11.5px;margin-bottom:5px}
+.field select,.field input{width:100%;padding:9px 11px;border-radius:5px;color:var(--ink);font-family:inherit;font-size:13px;background:#fff;border:1px solid var(--line2);outline:0}
+.field select:focus,.field input:focus{border-color:var(--gold)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.btn-main{width:100%;padding:12px;border:0;border-radius:5px;cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--gold2),var(--gold));box-shadow:0 8px 18px rgba(168,121,31,.25)}
+.btn-main:hover{filter:brightness(1.05)}
+.results{display:flex;flex-direction:column;gap:14px}
+.biggrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.big{padding:18px;text-align:center;border-top:3px solid var(--gold)}
+.big small{display:block;color:var(--faint);font-size:11.5px;letter-spacing:1px;margin-bottom:8px}
+.big .num{font-family:Consolas,monospace;font-size:28px;font-weight:700;color:var(--gold)}
+.chart{padding:18px}
+.chart svg{width:100%;height:280px;display:block}
+.legend{display:flex;gap:16px;padding:0 4px 4px;color:var(--dim);font-size:12px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}</style></head><body><div class="app"><div class="topbar"><div class="brand"><span class="dot">肥</span><div><b>肥牛妙妙工具</b><small>伤害计算 · 寻路分析 · PRTS 数据</small></div></div><nav class="nav"><button data-p="home" class="active">主界面</button><button data-p="op">干员图鉴</button><button data-p="mon">怪物图鉴</button><button data-p="dps">DPS 计算</button></nav><div class="top-actions"><span class="chipbtn">设置</span><span class="chipbtn">同步全图鉴</span></div></div><section class="page active" id="p-home">
+<div class="hero"><div class="eyebrow">COMMAND CENTER</div><h1>选择功能</h1><p>明日方舟数据工具集：伤害、寻路、沙盘与全图鉴查询。</p></div>
+<div class="featgrid">
+<div class="card feat"><div class="ico">&#9876;</div><h3>伤害计算</h3><p>按干员面板与技能倍率，算物理 / 法术 / 元素 / 真实伤害，给出随敌方防御变化的 DPS 曲线。</p><div class="go">进入 &rarr;</div></div>
+<div class="card feat"><div class="ico">&#129517;</div><h3>寻路分析</h3><p>按关卡地图还原敌人行进路线与出怪时间轴，查看每秒谁从哪个坐标出发。</p><div class="go">进入 &rarr;</div></div>
+<div class="card feat"><div class="ico">&#9823;</div><h3>沙盘推演</h3><p>在寻路图上摆干员、放箱子、踢敌人、加减速，实时看路线改道与到达时间变化。</p><div class="go">进入 &rarr;</div></div>
+</div>
+<div class="cardhead"><span class="bar"></span><h3>数据索引</h3><span class="extra">本地缓存 · 离线可用</span></div>
+<div class="indexgrid">
+<div class="card indexcard"><h4>干员数据</h4><p>463 名干员的职业、分支、面板与技能倍率查询。</p></div>
+<div class="card indexcard"><h4>怪物数据图鉴</h4><p>按名字检索敌人，查看特性、技能与各类抗性。</p></div>
+<div class="card indexcard"><h4>数据字段图鉴</h4><p>解包数据的 145 个字段逐条解释，按名字搜索。</p></div>
+</div>
+</section>
+<section class="page" id="p-op">
+<div class="hero"><div class="eyebrow">OPERATOR ARCHIVE</div><h1>干员图鉴</h1><p>输入名字筛选，点条目查看档案：面板、信赖、潜能、模组、天赋与技能。</p></div>
+<div class="split">
+<div class="card listbox">
+<div class="search"><input placeholder="搜索干员 / char_id / 机制关键词"></div>
+<div class="filters"><span class="fchip on">全部职业</span><span class="fchip">近卫</span><span class="fchip">狙击</span><span class="fchip">术师</span><span class="fchip">医疗</span></div>
+<div class="list">
+<div class="item">能天使　★★★★★★　狙击 速射手</div>
+<div class="item">史尔特尔　★★★★★★　近卫 术战者</div>
+<div class="item sel">艾雅法拉　★★★★★★　术师 中坚术师</div>
+<div class="item">银灰　★★★★★★　近卫 领主</div>
+<div class="item">克莱门莎　★★★★★　特种 陷阱师</div>
+<div class="item">安洁莉娜　★★★★★　辅助 减速</div>
+<div class="item">白面鸮　★★★★★　医疗 群愈师</div>
+<div class="item">棘刺　★★★★★★　近卫 领主</div>
+<div class="item">塞雷娅　★★★★★★　重装 守护者</div>
+<div class="item">伊芙利特　★★★★★★　术师 轰击术师</div>
+</div>
+<div class="count">显示 10 / 463</div>
+</div>
+<div class="detail">
+<div class="card headcard"><div class="avatar">羊</div><div class="meta"><h2>艾雅法拉</h2><div class="stars">★★★★★★</div><div class="tags"><span class="tag">术师</span><span class="tag alt">中坚术师</span><span class="tag">远程位</span><span class="tag alt">法术</span></div></div></div>
+<div class="card statgrid">
+<div class="stat"><small>生命上限</small><b>1830</b></div><div class="stat"><small>攻击力</small><b class="hl">783</b></div><div class="stat"><small>防御力</small><b>126</b></div><div class="stat"><small>法术抗性</small><b>20</b></div>
+<div class="stat"><small>部署费用</small><b>21</b></div><div class="stat"><small>阻挡数</small><b>1</b></div><div class="stat"><small>攻击间隔</small><b>1.6 秒</b></div><div class="stat"><small>抬手</small><b>23 帧</b></div>
+</div>
+<div class="card block"><div class="cardhead" style="padding:0 0 10px"><span class="bar"></span><h3>天赋</h3></div><p><b style="color:var(--gold)">炎息</b>　攻击力 +14%，攻击速度 +7</p><p><b style="color:var(--gold)">乱火</b>　部署后 8 秒内攻击力提升至 130%</p></div>
+<div class="card block"><div class="cardhead" style="padding:0 0 10px"><span class="bar"></span><h3>技能</h3></div>
+<div class="skillrow"><div class="skname">二重咏唱</div><div class="skdesc">攻击回复 · 自动触发。下次攻击造成相当于攻击力 200% 的法术伤害。</div></div>
+<div class="skillrow"><div class="skname">点燃</div><div class="skdesc">攻击回复 · 自动触发。下次攻击造成 380% 法术伤害，并对周围敌人造成溅射。</div></div>
+<div class="skillrow"><div class="skname">火山</div><div class="skdesc">自动回复 · 手动触发。攻击力 +130%，攻击间隔缩短，攻击变为 6 连击。</div></div>
+</div>
+</div>
+</div>
+</section>
+<section class="page" id="p-mon">
+<div class="hero"><div class="eyebrow">ENEMY ARCHIVE</div><h1>怪物图鉴</h1><p>按名字检索敌人，查看特性、技能、抗性与抬手时间。</p></div>
+<div class="split">
+<div class="card listbox">
+<div class="search"><input placeholder="搜索敌人 / enemy_id"></div>
+<div class="filters"><span class="fchip on">全部</span><span class="fchip">感染生物</span><span class="fchip">无人机</span><span class="fchip">萨卡兹</span></div>
+<div class="list">
+<div class="item">源石虫 · α</div><div class="item">猎狗 pro</div><div class="item sel">重装防御者</div><div class="item">磐蟹</div><div class="item">萨卡兹大剑手</div><div class="item">寻仇者</div><div class="item">幽灵组长</div><div class="item">粉碎攻坚手</div><div class="item">霜星</div><div class="item">爱国者</div>
+</div>
+<div class="count">显示 10 / 2186</div>
+</div>
+<div class="detail">
+<div class="card headcard"><div class="avatar">盾</div><div class="meta"><h2>重装防御者</h2><div class="stars" style="color:var(--red)">LEVEL 0 · ELITE 0</div><div class="tags"><span class="tag">感染生物</span><span class="tag alt">近战</span><span class="tag">物理</span></div></div></div>
+<div class="card statgrid">
+<div class="stat"><small>生命上限</small><b>8000</b></div><div class="stat"><small>攻击力</small><b class="hl">750</b></div><div class="stat"><small>防御力</small><b>1200</b></div><div class="stat"><small>法术抗性</small><b>0</b></div><div class="stat"><small>攻击间隔</small><b>2.8 秒</b></div><div class="stat"><small>移动速度</small><b>0.75</b></div>
+</div>
+<div class="card block"><div class="cardhead" style="padding:0 0 10px"><span class="bar"></span><h3>特性 / 描述</h3></div><p>身披重甲的敌方前线单位，拥有极高的防御力，需要用高破甲或法术手段应对。</p></div>
+<div class="card block"><div class="cardhead" style="padding:0 0 10px"><span class="bar"></span><h3>能力</h3></div><p><b style="color:var(--red)">【重甲】</b>　受到的物理伤害降低；被阻挡时防御力进一步提升。</p></div>
+</div>
+</div>
+</section>
+<section class="page" id="p-dps">
+<div class="hero"><div class="eyebrow">DAMAGE CALCULATOR</div><h1>DPS 计算</h1><p>选干员后自动计算，支持加拐与多类型伤害曲线对比。</p></div>
+<div class="dpsgrid">
+<div class="card form">
+<div class="field"><label>干员</label><input value="艾雅法拉（已缓存）"></div>
+<div class="row2"><div class="field"><label>精英</label><select><option>精英 2</option></select></div><div class="field"><label>等级</label><select><option>90</option></select></div></div>
+<div class="row2"><div class="field"><label>模组</label><select><option>无模组</option><option>DELTA 模组</option></select></div><div class="field"><label>模组等级</label><select><option>3</option></select></div></div>
+<div class="row2"><div class="field"><label>召唤物</label><select><option>不计入</option></select></div><div class="field"><label>数量</label><select><option>1</option></select></div></div>
+<div class="field"><label>技能</label><select><option>不使用技能</option><option>火山（专三）</option></select></div>
+<div class="field"><label>技能等级</label><select><option>专三</option></select></div>
+<div class="field"><label>伤害类型</label><select><option>法术</option><option>物理</option></select></div>
+<div class="row2"><div class="field"><label>目标防御</label><input value="200"></div><div class="field"><label>法术抗性</label><input value="0"></div></div>
+<div class="row2"><div class="field"><label>元素抗性</label><input value="0"></div><div class="field"><label>攻击力（面板）</label><input value="540"></div></div>
+<button class="btn-main">获取并计算</button>
+</div>
+<div class="results">
+<div class="biggrid"><div class="card big"><small>单次伤害</small><div class="num">2 481</div></div><div class="card big"><small>DPS</small><div class="num">1 550</div></div><div class="card big"><small>DPH</small><div class="num">2 481</div></div></div>
+<div class="card chart">
+<div class="cardhead" style="padding:0 0 10px"><span class="bar"></span><h3>DPS 曲线</h3><span class="extra">横轴：敌方防御</span></div>
+<svg viewBox="0 0 760 260" preserveAspectRatio="none"><defs><linearGradient id="ga2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c99b3f" stop-opacity=".28"/><stop offset="1" stop-color="#c99b3f" stop-opacity="0"/></linearGradient><linearGradient id="gb2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3f6fb5" stop-opacity=".2"/><stop offset="1" stop-color="#3f6fb5" stop-opacity="0"/></linearGradient></defs>
+<line x1="0" y1="220" x2="760" y2="220" stroke="rgba(70,60,30,.14)" stroke-width="1"/><line x1="0" y1="140" x2="760" y2="140" stroke="rgba(70,60,30,.07)" stroke-width="1"/><line x1="0" y1="60" x2="760" y2="60" stroke="rgba(70,60,30,.07)" stroke-width="1"/>
+<path d="M0,200 C80,195 140,170 220,160 C320,146 390,110 470,96 C560,80 650,58 760,44 L760,220 L0,220 Z" fill="url(#ga2)"/><path d="M0,210 C100,205 180,190 280,172 C400,148 520,120 640,96 C700,84 735,76 760,70 L760,220 L0,220 Z" fill="url(#gb2)"/>
+<path d="M0,200 C80,195 140,170 220,160 C320,146 390,110 470,96 C560,80 650,58 760,44" fill="none" stroke="#c99b3f" stroke-width="3"/><path d="M0,210 C100,205 180,190 280,172 C400,148 520,120 640,96 C700,84 735,76 760,70" fill="none" stroke="#3f6fb5" stroke-width="3"/></svg>
+<div class="legend"><span><i style="background:#c99b3f"></i>艾雅法拉 · 火山</span><span><i style="background:#3f6fb5"></i>对比槽位 2</span></div>
+</div>
+<div class="card block"><div class="cardhead" style="padding:0 0 10px"><span class="bar"></span><h3>计算过程</h3></div><p style="font-family:Consolas,monospace;font-size:12.5px">1. 面板攻击力 540 × (1 + 0.14 + 1.30) = 1 317<br>2. 技能倍率 240% → 单次 3 162<br>3. 目标法抗 0 → 法穿后承伤 100% → 单次 2 481</p></div>
+</div>
+</div>
+</section>
+</div>
+<script>
+const navs = document.querySelectorAll('.nav button');
+navs.forEach(btn => btn.addEventListener('click', () => {
+  navs.forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('p-' + btn.dataset.p).classList.add('active');
+}));
+document.querySelectorAll('.feat, .indexcard').forEach(c => {
+  c.addEventListener('click', () => {
+    const t = c.textContent.trim();
+    let target = 'home';
+    if (t.includes('伤害')) target = 'dps';
+    else if (t.includes('怪物')) target = 'mon';
+    else if (t.includes('干员')) target = 'op';
+    navs.forEach(b => { b.classList.toggle('active', b.dataset.p === target); });
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('p-' + target).classList.add('active');
+    window.scrollTo({top:0, behavior:'smooth'});
+  });
+});
+</script>
+</body></html>

@@ -19,7 +19,9 @@ from ..core import enemy_class as ECLS
 from ..core import enemy_codex as EC
 from ..core import enemy_icons as EI
 from ..core import enemy_skills as ES
+from ..core import enemy_timing as ETIM
 from ..core import operator_icons as OI
+from ..core import operator_timing as OTIM
 from ..core import skilldata as SD
 from ..core import skills as SK
 from .annotation_card import AnnotationCard, attach_buttons
@@ -1053,6 +1055,34 @@ class OperatorIndexView(_IndexView):
             ("阻挡数", _fnum(st.get("block"))),
             ("攻击间隔", _fnum(st.get("attack_interval"), 1) + " 秒"),
         ]
+        # 抬手：解包 bake 里普攻动画 OnAttack 的时间点。攻击间隔是「两下
+        # 之间隔多久」，抬手是「这一下从抬手到打出去要多久」，两个是不同
+        # 的东西，放同一张面板里正好对照着看。
+        # a == 0 是真实值（瞬发无前摇），不能显示成「未收录」。
+        char_key = str(o.get("char_id") or "")
+        atk_items: List[Tuple[str, str]] = []
+        a_sec = OTIM.seconds(char_key)
+        if a_sec is not None:
+            atk_items.append(("抬手", "%d 帧（%.3f 秒）" % (
+                OTIM.sec_to_frames(a_sec), a_sec)))
+        else:
+            why = OTIM.reason(char_key)
+            if why == "SKILL_ONLY":
+                atk_items.append(("抬手", "仅技能期间有普攻"))
+            elif why == "DOLL":
+                atk_items.append(("抬手", "普攻在召唤物上"))
+            elif why == "NO_ATTACK":
+                atk_items.append(("抬手", "无普攻"))
+            elif why == "NO_ANIM":
+                atk_items.append(("抬手", "未收录"))
+            # 查不到就整条不显示，别塞「未知」占地方
+
+        s_sec = OTIM.start_seconds(char_key)
+        if s_sec is not None:
+            atk_items.append(("登场", "%d 帧（%.3f 秒）" % (
+                OTIM.sec_to_frames(s_sec), s_sec)))
+
+        items.extend(atk_items)
         self._stat_grid(self._stat_host, "精英%d · 等级 %s" % (elite, level),
                         items, cols=4)
 
@@ -1198,27 +1228,20 @@ class OperatorIndexView(_IndexView):
                          foreground=FG_DIM, font=(FONT_UI, FS_MICRO)).pack(
                     side="left", padx=(PAD_S, 0))
 
-            # 查看原代码：等级选择 + 按钮。官方表里一个技能是 levels 数组
-            # （1~7 级 + 专一/专二/专三 共 10 个等级），每个等级结构相同、
-            # 仅 blackboard/description 数值不同。这里只展示所选等级的单条
-            # 原始数据，避免把 10 个几乎一样的对象全部堆出来（用户反馈的
-            # 「代码重复」正是这个原因，属官方数据结构，非渲染 bug）。
-            lv_opt = sorted(levels.keys(), key=lambda k: _LV_ORDER.get(str(k), 0))
-            code_lv = ComboBox(hd, compact=True, values=lv_opt, width=7)
-            code_lv.set(lv_opt[-1])
-            code_lv.pack(side="right", padx=(PAD_XS, PAD_XS))
-            btn = tk.Button(hd, text="查看原代码", relief="flat",
-                            background=BG_DEEP, foreground=ACCENT,
-                            activebackground=BG_PANEL,
-                            activeforeground=ACCENT,
-                            font=(FONT_UI, FS_MICRO),
-                            highlightthickness=1, highlightbackground=BORDER,
-                            cursor="hand2", padx=8, pady=1,
-                            command=lambda sid=self._skill_id(
-                                full, name_index, char_id, nm,
-                                sk.get("index")), cb=code_lv:
-                                self._open_skill_code(sid, cb.get()))
-            btn.pack(side="right")
+            # 技能抬手：同一份 bake 里 Skill* 动画的 OnAttack 时刻。
+            # 放在技能名右边，紧挨着类型标签——用户要的就是「技能旁边的
+            # 抬手」，而不是另开一张卡。
+            # a == 0 表示该技能瞬发（如阿米娅），要显示「瞬发」不是「0 帧」；
+            # 找不到对应动画就不显示，别写「未收录」吓人。
+            sk_slot = sk.get("index")
+            try:
+                sk_txt = OTIM.describe_skill(char_id, int(sk_slot))
+            except (TypeError, ValueError):
+                sk_txt = ""
+            if sk_txt:
+                tk.Label(hd, text=sk_txt, background=CARD,
+                         foreground=ACCENT_SOFT, font=(FONT_UI, FS_MICRO)).pack(
+                    side="left", padx=(PAD_M, 0))
 
             # 各级数值表格：技能等级 -> 数值列
             keys = sorted(levels.keys(), key=lambda k: _LV_ORDER.get(str(k), 0))
@@ -1297,7 +1320,7 @@ class OperatorIndexView(_IndexView):
             title += " · %s" % skill_name
         # 结构注解：prefabId 是什么、每个 blackboard key 的中文意思、
         # spData 各字段口径。干员侧比敌人侧多一份 statemachines
-        # （codex_fields.json 的 525 条生命周期记录），有就直接贴上来——
+        # （codex_fields.json 的生命周期记录），有就直接贴上来——
         # 那是唯一能说明「技能内部怎么跑」的官方数据。
         level = levels[idx] if isinstance(levels, list) and levels else {}
         env_ = ES.env(self.app, with_operator=True)
@@ -1422,18 +1445,7 @@ class OperatorIndexView(_IndexView):
                          font=(FONT_UI, FS_SMALL), anchor="w", justify="left",
                          wraplength=560).pack(fill="x", pady=(PAD_XS, 0))
 
-            # 查看原代码：展示 battle_equip_table.json 里该模组的原始条目
             mid = m.get("id") or ""
-            if mid:
-                btn = tk.Button(hd, text="查看原代码", relief="flat",
-                                background=BG_DEEP, foreground=ACCENT,
-                                activebackground=BG_PANEL,
-                                activeforeground=ACCENT,
-                                font=(FONT_UI, FS_MICRO),
-                                highlightthickness=1, highlightbackground=BORDER,
-                                cursor="hand2", padx=8, pady=0,
-                                command=lambda mid=mid: self._open_module_code(mid))
-                btn.pack(side="right")
         card.harmonize()
 
     def _render_module_phases(self, master, phases) -> None:
@@ -1673,17 +1685,6 @@ class MonsterIndexView(_IndexView):
         idrow.pack(fill="x")
         tk.Label(idrow, text=eid, background=CARD, foreground=FG_DIM,
                  font=(FONT_NUM, FS_MICRO), anchor="w").pack(side="left")
-        if entries:
-            btn = tk.Button(idrow, text="查看原代码", relief="flat",
-                            background=BG_DEEP, foreground=ACCENT,
-                            activebackground=BG_PANEL,
-                            activeforeground=ACCENT,
-                            font=(FONT_UI, FS_MICRO),
-                            highlightthickness=1, highlightbackground=BORDER,
-                            cursor="hand2", padx=8, pady=0,
-                            command=lambda: self._open_enemy_code(eid,
-                                                                  entries))
-            btn.pack(side="right")
 
         # 分类徽章
         cls = self.classmap.get(eid, {})
@@ -1708,7 +1709,28 @@ class MonsterIndexView(_IndexView):
             self._anno_card(eid, nm)
             return
 
-        self._grid_card("基础面板", entry["stats"], 4)
+        # 抬手并进「基础面板」，不另开卡：用户要的是打开图鉴就能在面板里
+        # 看到抬手，而不是再往下找一张专门的卡。
+        # 三个来源依次兜底：enemy_timing 的秒数 -> 归因码 -> 干脆不显示。
+        stats_items = list(entry["stats"])
+        tst = ETIM.get(eid)
+        if tst:
+            sec_a = tst.get("a")
+            if isinstance(sec_a, (int, float)) and not isinstance(sec_a, bool):
+                if sec_a == 0:
+                    txt = "0 帧（瞬发）"
+                else:
+                    txt = "%d 帧（%.3f 秒）" % (ETIM.sec_to_frames(sec_a), sec_a)
+                anim = tst.get("anim") or ""
+                if tst.get("skill_only"):
+                    txt += "（取自技能动作 %s）" % anim
+                elif anim and anim != "Attack":
+                    txt += "（动作 %s）" % anim
+                stats_items.append(("抬手", txt))
+        else:
+            # 明确的「没有」比空着有用：箱体/载具/纯机制敌人本来就没普攻
+            stats_items.append(("抬手", "无普攻动作"))
+        self._grid_card("基础面板", stats_items, 4)
         res = entry["resists"] + entry.get("extra", [])
         self._grid_card("抗性", res, 4)
         if entry.get("immunes"):
@@ -1746,13 +1768,6 @@ class MonsterIndexView(_IndexView):
         """
         card = Card(self.right_inner, title="技能")
         card.pack(fill="x", pady=(0, PAD_S))
-        tk.Button(card.head_right, text="查看原代码", relief="flat",
-                  background=BG_DEEP, foreground=ACCENT,
-                  activebackground=CARD, activeforeground=ACCENT,
-                  font=(FONT_UI, FS_MICRO), highlightthickness=1,
-                  highlightbackground=BORDER, cursor="hand2", padx=8, pady=0,
-                  command=lambda: self._open_enemy_code(eid, entries)).pack(
-            side="right")
 
         blocks = ES.build_blocks(eid, secs, codes, prts)
         if not blocks:
@@ -1762,16 +1777,19 @@ class MonsterIndexView(_IndexView):
         else:
             ESR.render_skills(card.body, blocks, ES.env(self.app), wrap=540,
                               max_bb=6)
+        # 字段对照说明
+        tk.Label(card.body,
+                 text="字段对照：initCooldown = 初始，cooldown = 消耗，"
+                      "spCost = 技力消耗",
+                 background=CARD, foreground=FG_DIM,
+                 font=(FONT_UI, FS_MICRO), anchor="w", justify="left",
+                 wraplength=540).pack(fill="x", pady=(PAD_S, 0))
         if not prts:
             tk.Label(card.body, text="PRTS 敌人页没有这只怪的技能记录，"
                                    "描述来自游戏内敌人档案。",
                      background=CARD, foreground=FG_DIM,
                      font=(FONT_UI, FS_MICRO), anchor="w", justify="left",
                      wraplength=540).pack(fill="x", pady=(PAD_S, 0))
-        unpack = ESR.unpack_lines(codes)
-        if unpack:
-            ESR.collapsible(card.body, "解包数值（enemyData.skills 原样）",
-                            unpack, wrap=530, note=ESR.UNPACK_NOTE)
         card.harmonize()
 
     def _open_enemy_code(self, eid: str, entries) -> None:

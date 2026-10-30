@@ -50,6 +50,15 @@ BAR_HIGH = "#8e7cc3"
 BAR_SKILL = "#e67e22"
 BAR_DEAD = "#3a4250"
 
+#: 手动开技能的标记色。与 ``BAR_SKILL`` 同为橙色系但更亮，
+#: 语义不同：``BAR_SKILL`` 是「自动触发下推演出来的技能持续段」，
+#: ``USE_SKILL`` 是「用户按下开启技能的那一刻」——一条竖线。
+USE_SKILL = "#ffb347"
+#: 自动触发技能的边线：实心块 + 同色描边表示「这是数据推出来的，不是玩家操作」
+AUTO_EDGE = "#b35c00"
+#: 手动技能候选段（SP 够了的窗口）用的虚线色，压在色条下方
+MANUAL_WIN = "#5a4a2a"
+
 PAD_L, PAD_R, PAD_T, PAD_B = 54, 16, 12, 22
 ROW_H = 17
 #: 粗轴上方留给时间刻度的位置
@@ -218,15 +227,37 @@ class TrackCanvas(tk.Canvas):
             self.create_rectangle(x0, top, x1, top + bh, fill=fill,
                                   outline="" if alive else color, width=1)
             hit.append((x0, top, x1, top + bh, dep.uid, "bar"))
-        # 技能段
-        for (a, b) in self._cycle_cache.get(dep.uid, []):
+        # 技能段。
+        #
+        # 两种东西画法必须不同，否则用户会以为「技能在自己放」：
+        # * 自动触发（``cycles`` 有值）：SP 满就开是规则决定的，一直循环到
+        #   该干员撤退为止，画**实心块** + 描边。段已经由上游按撤退时刻
+        #   截断，这里再夹一次 ``alive_to`` 兜底（防外部直接喂数据）。
+        # * 手动触发（``cycles`` 为空）：什么时候开由用户决定，只有
+        #   ``skill_uses`` 里记下的时刻是既成事实，画**竖线标记**。
+        auto_seg = self._cycle_cache.get(dep.uid, [])
+        for (a, b) in auto_seg:
             sa = self._x(min(dur, max(0.0, a)))
             sb = self._x(min(dur, max(0.0, b)))
             if sb - sa < 1:
                 continue
             self.create_rectangle(sa, top + bh * 0.25, sb, top + bh * 0.75,
-                                  fill=BAR_SKILL, outline="")
+                                  fill=BAR_SKILL, outline=AUTO_EDGE, width=1)
             hit.append((sa, top, sb, top + bh, dep.uid, "skill"))
+        # 手动开技能的时刻：一条从条顶到条底的竖线，顶部加一个小三角，
+        # 与「部署三角」同形状但用橙色，一眼能分出是技能不是部署。
+        if not auto_seg:
+            for t in (getattr(dep, "skill_uses", None) or []):
+                # 撤退之后记的时刻没有意义（人已经不在场），跳过。
+                if t < 0 or t > dur:
+                    continue
+                if dep.retreat_time is not None and t > dep.retreat_time:
+                    continue
+                ux = self._x(t)
+                self.create_line(ux, top, ux, top + bh, fill=USE_SKILL, width=2)
+                self.create_polygon(ux - 3, top - 2, ux + 3, top - 2, ux,
+                                    top + 3, fill=USE_SKILL, outline="")
+                hit.append((ux - 3, top, ux + 3, top + bh, dep.uid, "use"))
         # 部署 / 撤退三角
         self.create_polygon(x0, top - 3, x0 - 3, top - 9, x0 + 3, top - 9,
                             fill=color, outline="")
@@ -263,8 +294,22 @@ class TrackCanvas(tk.Canvas):
         if dep.skill_name:
             lines.append("技能 %s" % dep.skill_name)
         cyc = self._cycle_cache.get(uid) or []
+        uses = getattr(dep, "skill_uses", None) or []
         if cyc:
-            lines.append("技能段 %d 次" % len(cyc))
+            # 自动触发：从部署一直循环到撤退（或轴尾）。
+            tail = ("撤退 %.1fs" % dep.retreat_time
+                    if dep.retreat_time is not None else "轴尾")
+            lines.append("自动触发：循环 %d 段（至%s）" % (len(cyc), tail))
+        elif uses:
+            lines.append("手动开启 %d 次" % len(uses))
+            lines.append("　" + " / ".join("%.1fs" % t for t in uses[:6])
+                         + ("…" if len(uses) > 6 else ""))
+        else:
+            # 手动技能且用户还没点过「开启技能」——这是正常的初始状态，
+            # 不能显示成「0 段」让人以为数据缺失。
+            trig = getattr(dep.skill, "trigger", "")
+            lines.append("手动触发：还没记开启时刻" if trig == "MANUAL"
+                         else "无可画的技能段")
         fs = 8
         tw = max(len(s) for s in lines) * (fs + 1) + 14
         th = len(lines) * (fs + 5) + 8
@@ -326,6 +371,7 @@ class TrackCanvas(tk.Canvas):
         visible = max(1, int(avail // max(1, self._row_h)))
         if n <= visible:
             return
+        # 滚轮向下 → 列表向下滚（看到下方内容），与 Windows 标准一致
         delta = -1 if getattr(event, "delta", 0) > 0 else 1
         self._scroll = max(0, min(n - visible, self._scroll + delta))
         self.redraw()

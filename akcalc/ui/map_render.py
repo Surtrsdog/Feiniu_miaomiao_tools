@@ -345,14 +345,59 @@ def _dot_sprite(color, r: float, ring=True) -> Image.Image:
         d.ellipse([cx - r*s - 2, cy - r*s - 2, cx + r*s + 2, cy + r*s + 2],
                   fill=_rgba((255, 255, 255), 235))
     d.ellipse([cx - r*s, cy - r*s, cx + r*s, cy + r*s], fill=_rgba(color))
-    # 高光
-    d.ellipse([cx - r*s*0.42, cy - r*s*0.60, cx + r*s*0.06, cy - r*s*0.12],
-              fill=(255, 255, 255, 120))
+    # 高光（居中偏上，对称左右）
+    d.ellipse([cx - r*s*0.35, cy - r*s*0.55, cx + r*s*0.35, cy - r*s*0.05],
+              fill=(255, 255, 255, 110))
     # 缩到 1x：画布边长 rad*2 -> 实际显示时的直径（r 的 3.4 倍余量）
     side = max(8, int(round(rad * 2 / s * 1.0)))
     sp = im.resize((side, side), Image.LANCZOS)
     _SPRITE_CACHE[key] = sp
     return sp
+
+
+# ---------------------------------------------------------------- 头像精灵（B5 / §8 棋子头像）
+
+_AVATAR_CACHE: Dict[Tuple, Image.Image] = {}
+_MASK_CACHE: Dict[int, Image.Image] = {}
+
+
+def _circle_mask(d: int) -> Image.Image:
+    """圆形遮罩（4x 超采样后缩小，边缘抗锯齿）。"""
+    m = _MASK_CACHE.get(d)
+    if m is not None:
+        return m
+    s = 4
+    big = Image.new("L", (d * s, d * s), 0)
+    ImageDraw.Draw(big).ellipse([0, 0, d * s - 1, d * s - 1], fill=255)
+    m = big.resize((d, d), Image.LANCZOS)
+    _MASK_CACHE[d] = m
+    return m
+
+
+def _avatar_sprite(paths, name: str, d: int) -> Optional[Image.Image]:
+    """圆形头像精灵。取不到图标返回 ``None``，调用方退回画首字。
+
+    缓存 key 为 ``(name, d)``——不同尺寸分别缓存。
+    """
+    key = (name, d)
+    sp = _AVATAR_CACHE.get(key)
+    if sp is not None:
+        return sp
+    if paths is None:
+        return None
+    try:
+        from ..core import operator_icons as OI
+        ic = OI.load_icon(paths, name, d)
+    except Exception:
+        return None
+    if ic is None:
+        return None
+    if ic.mode != "RGBA":
+        ic = ic.convert("RGBA")
+    base = Image.new("RGBA", (d, d), (0, 0, 0, 0))
+    base.paste(ic, (0, 0), _circle_mask(d))
+    _AVATAR_CACHE[key] = base
+    return base
 
 
 class MapRenderer:
@@ -419,6 +464,8 @@ class MapRenderer:
         #: 这一步（一次 LANCZOS 缩放），不重烘焙主图；动画播放时直接复用。
         self._scaled: Optional[Image.Image] = None
         self._scaled_key = None
+        #: 干员图标数据目录（用于加载头像）。由 ``set_paths`` 注入。
+        self.paths = None
 
     # ------------------------------------------------------------ 几何
 
@@ -434,6 +481,15 @@ class MapRenderer:
         self._master_dims = None
         self._scaled = None
         self._scaled_key = None
+
+    def set_paths(self, paths) -> None:
+        """注入 ``Paths`` 实例（用于加载干员头像图标）。
+
+        换数据目录后必须清头像缓存和精灵缓存。
+        """
+        self.paths = paths
+        _AVATAR_CACHE.clear()
+        _MASK_CACHE.clear()
 
     def disp_rc(self, row: float, col: float):
         """数据格坐标 -> 显示格坐标（应用翻转）。
@@ -592,6 +648,7 @@ class MapRenderer:
             self._scaled = base
             self._scaled_key = base_key
         im = self._scaled.copy()
+        # 敌人层画在 im 上（复用单个 Draw 对象减少分配）
         self._draw_enemies(im)
         self._draw_portal_link(im)
         self._draw_sandbox(im)
@@ -757,11 +814,134 @@ class MapRenderer:
             # 隔离视图不放动画，没有敌人圆点可套环，于是把高亮做成
             # 「路线起点处的呼吸环 + 指向路线的箭头」。
             self._draw_isolate_highlight(od, gm, ss)
+            # S3: 预置装置画在静态层（位置一关内不变）
+            self._draw_devices(od, gm, ss)
             out = Image.alpha_composite(im.convert("RGBA"), ov)
             return out.resize((w // SS, h // SS), Image.LANCZOS)
         finally:
             self.cell = saved_cell
             self.origin_x, self.origin_y = saved_ox, saved_oy
+
+    def _draw_devices(self, d, gm: GameMap, ss: int) -> None:
+        """S3: 在静态层画出预置装置（几何图形 + 中文首字）。
+
+        - A 类（改路）：棕色圆角矩形
+        - B 类（实体阻挡）：灰色圆角矩形
+        - C 类（功能）：蓝色圆形
+        - D 类（装饰）：浅灰小圆点（不画字）
+        - stack_size > 1：右下角画 ×N 角标
+        """
+        if not getattr(gm, "devices", None):
+            return
+        cell = self.cell * ss
+        ox, oy = self.origin_x * ss, self.origin_y * ss
+        size = int(cell * 0.56)   # 放大装置以提高辨识度
+        alpha = 210
+        colors = {
+            "A": (139, 90, 43, alpha),    # 棕
+            "B": (107, 114, 128, alpha),  # 灰
+            "C": (37, 99, 235, alpha),    # 蓝
+            "D": (156, 163, 175, alpha),  # 浅灰
+        }
+        for dev in gm.devices:
+            r, c = dev.row, dev.col
+            # hidden=True 的装置是"待激活/用户可选择"的，开局不在场上
+            if dev.hidden:
+                continue
+            if dev.category not in colors:
+                continue
+            # 翻转：和其他绘制一样过一遍 disp_rc
+            dr, dc = self.disp_rc(r, c)
+            cx = ox + dc * cell + cell // 2
+            cy = oy + dr * cell + cell // 2
+            color = colors[dev.category]
+            if dev.category == "D":
+                # 小圆点，不画字
+                radius = max(2, size // 3)
+                d.ellipse([cx - radius, cy - radius,
+                           cx + radius, cy + radius],
+                          fill=color)
+                continue
+            if dev.category == "C":
+                # 圆形
+                radius = size // 2
+                d.ellipse([cx - radius, cy - radius,
+                           cx + radius, cy + radius],
+                          fill=color)
+            else:
+                # 圆角矩形（A / B）
+                radius = max(2, size // 4)
+                x0, y0 = cx - size // 2, cy - size // 2
+                x1, y1 = cx + size // 2, cy + size // 2
+                d.rounded_rectangle([x0, y0, x1, y1],
+                                    radius=radius, fill=color)
+            # 中文首字
+            try:
+                from PIL import ImageFont
+                name = dev.token_key
+                # 从 catalog 取中文名（如果有）
+                first_char = ""
+                # 尝试从 token_key 推首字——大多数中文名在 _make_device 里没存
+                # 所以用 token_key 的最后一个单词首字母做降级
+                # 实际上 Device 没有存 name 字段，从 token_catalog 查
+                char_label = self._device_label(dev)
+                if char_label:
+                    font_size = max(8, int(cell * 0.22))
+                    try:
+                        font = ImageFont.truetype(
+                            "C:\\Windows\\Fonts\\msyh.ttc", font_size * ss // ss)
+                    except Exception:
+                        font = ImageFont.load_default()
+                    # 白描边 + 深填充
+                    tw = d.textlength(char_label, font=font)
+                    tx = cx - tw / 2
+                    ty = cy - font_size / 2
+                    for dx in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            if dx == 0 and dy == 0:
+                                continue
+                            d.text((tx + dx, ty + dy), char_label,
+                                   fill=(255, 255, 255, 200), font=font)
+                    d.text((tx, ty), char_label,
+                           fill=(30, 30, 30, 255), font=font)
+            except Exception:
+                pass
+            # ×N 角标
+            if dev.stack_size > 1:
+                badge = "x%d" % dev.stack_size
+                try:
+                    from PIL import ImageFont
+                    bfs = max(7, int(cell * 0.14))
+                    bf = ImageFont.truetype(
+                        "C:\\Windows\\Fonts\\msyh.ttc", bfs)
+                except Exception:
+                    bf = ImageFont.load_default()
+                bw = d.textlength(badge, font=bf)
+                bx = cx + size // 2 - bw
+                by = cy + size // 2 - bfs
+                d.rounded_rectangle([bx - 2, by - 1, bx + bw + 2, by + bfs + 1],
+                                    radius=2, fill=(0, 0, 0, 180))
+                d.text((bx, by), badge, fill=(255, 255, 0, 255), font=bf)
+
+    def _device_label(self, dev) -> str:
+        """从 token_catalog 取装置中文名首字。"""
+        nm = self._device_name(dev)
+        return nm[:1] if nm else ""
+
+    def _device_name(self, dev) -> str:
+        """从 token_catalog 取装置完整中文名。"""
+        if not hasattr(self, "_dev_catalog"):
+            import json, os
+            path = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__)))),
+                "akcalc", "data", "token_catalog.json")
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    self._dev_catalog = json.load(f).get("tokens", {})
+            except Exception:
+                self._dev_catalog = {}
+        info = self._dev_catalog.get(dev.token_key, {})
+        return info.get("name", "") or ""
 
     def _tile_fill(self, t: Optional[Tile]):
         """地块底色与高光色。"""
@@ -1439,9 +1619,19 @@ class MapRenderer:
                     p2 = (x - base, y + sgn * rad * 0.35)
                     p3 = (x + base, y + sgn * rad * 0.35)
                 d.polygon([p1, p2, p3], fill=_rgba(PIECE_OPERATOR, 255))
-            # 名字首字：格子上直接能认出是谁
+            # 名字首字 / 头像（B5 §8 棋子头像）
             name = getattr(piece, "name", "") or ""
-            if name and cell >= 22:
+            dia = int(rad * 2) - 3          # 直径，留 3px 给外圈白边
+            if dia >= 14 and self.paths and name:
+                sp = _avatar_sprite(self.paths, name, dia)
+                if sp is not None:
+                    im.alpha_composite(sp,
+                                       (int(x - dia / 2), int(y - dia / 2)))
+                elif name and cell >= 22:
+                    d.text((x, y - rad * 0.15), name[0],
+                           font=_font(fs, True),
+                           fill=_rgba((255, 255, 255), 255), anchor="mm")
+            elif name and cell >= 22:
                 d.text((x, y - rad * 0.15), name[0], font=_font(fs, True),
                        fill=_rgba((14, 22, 32), 255), anchor="mm")
 
@@ -1464,62 +1654,106 @@ class MapRenderer:
         n = len(self.frame_enemies)
         r = max(4.0, self.cell * 0.155)
         fs = max(8, int(self.cell * 0.30))
+
+        # 复用一个 Draw 对象，避免每只敌人新建一次
+        draw = ImageDraw.Draw(im, "RGBA")
+
+        # ---- A2.2: sprite 缓存（同色同半径只生成一次）----
+        _sprite_cache = {}
+
+        def _get_dot(color_key, radius):
+            key = (color_key, round(radius, 1))
+            if key not in _sprite_cache:
+                _sprite_cache[key] = _dot_sprite(color_key, radius, ring=True)
+            return _sprite_cache[key]
+
+        # ---- A2.3: 按格聚合：>60 只时切聚合模式 ----
+        AGGREGATE_THRESHOLD = 60
+        use_aggregate = n > AGGREGATE_THRESHOLD
+
+        # 按格分组（用于聚合模式和重叠错开）
+        # 但画圆点时用原始浮点坐标，不用离散化坐标——否则连续移动会跳跃。
+        cells: Dict[Tuple[int, int], List[Tuple[int, dict]]] = {}
         for i, en in enumerate(self.frame_enemies):
-            row = en.get("row", 0)
-            col = en.get("col", 0)
-            x, y = self.tile_xy(float(row), float(col))
-            # 重叠错开：同格多只时沿圆周微偏
-            if n > 1:
-                same = [j for j, o in enumerate(self.frame_enemies)
-                        if abs(float(o.get("row", 0)) - float(row)) < 0.28
-                        and abs(float(o.get("col", 0)) - float(col)) < 0.28]
-                if len(same) > 1:
-                    k = same.index(i)
-                    ang = 2 * math.pi * k / len(same) - math.pi / 2
+            row = float(en.get("row", 0))
+            col = float(en.get("col", 0))
+            # 用整数格做分组键（仅用于判断"同格重叠"）
+            k = (int(row), int(col))
+            cells.setdefault(k, []).append((i, en))
+
+        for (kr, kc), group in cells.items():
+            if use_aggregate and len(group) > 3:
+                # 聚合模式：用格中心画 badge
+                row = float(kr)
+                col = float(kc)
+                x, y = self.tile_xy(row, col)
+                count = len(group)
+                rr = r * min(1.8, 1.0 + math.log10(count) * 0.4)
+                sp = _get_dot((240, 96, 90), rr)
+                im.alpha_composite(sp, (int(x - sp.width / 2),
+                                        int(y - sp.height / 2)))
+                txt = str(count) if count < 1000 else "%d" % (count // 100) + "百"
+                tfs = max(7, int(rr * 0.55))
+                draw.text((x, y), txt, font=_font(tfs, True),
+                        fill=_rgba((255, 255, 255), 245), anchor="mm")
+                continue
+
+            # 正常模式（≤60只或该格≤3只）：逐只画
+            for idx, (i, en) in enumerate(group):
+                # 用原始浮点坐标画——不用离散化坐标，否则连续移动会跳跃
+                erow = float(en.get("row", 0))
+                ecol = float(en.get("col", 0))
+                ex, ey = self.tile_xy(erow, ecol)
+                # 重叠错开：同格多只时绕中心散开
+                if len(group) > 1:
+                    ang = 2 * math.pi * idx / len(group) - math.pi / 2
                     off = r * 1.15
-                    x += math.cos(ang) * off
-                    y += math.sin(ang) * off
-            # 颜色统一解析：enemy["color"] 来自 timeline，存的是敌人名
-            # 字符串（用于分流配色），不是 RGB 元组；直接丢给 ImageDraw
-            # 会抛 str 无法转 int。先按名字哈希成稳定颜色。
-            ecol = en.get("color") or (240, 96, 90)
-            if isinstance(ecol, str):
-                ecol = _name_color(ecol)
-            hov = (self.hover_enemy == i)
-            hit = self._is_highlighted(en)
-            rr = r * (1.32 if hov else 1.0)
-            # 高亮：先画一圈放射状光晕（呼吸感来自半径，不依赖动画），
-            # 再在圆点外描两道环，保证在任何底色上都跳出来。
-            if hit:
-                gr = r * 3.2
-                glow = Image.new("RGBA", (int(gr * 2), int(gr * 2)), (0, 0, 0, 0))
-                gd = ImageDraw.Draw(glow)
-                cx = cy = gr
-                for k in range(6, 0, -1):
-                    t = k / 6.0
-                    gd.ellipse([cx - gr * t, cy - gr * t,
-                                cx + gr * t, cy + gr * t],
-                               fill=_rgba(HILITE_GLOW, int(46 * (1 - t) + 14)))
-                im.alpha_composite(glow, (int(x - gr), int(y - gr)))
-                dd0 = ImageDraw.Draw(im)
-                for wd, al in ((3, 235), (1, 255)):
-                    dd0.ellipse([x - r * 1.95, y - r * 1.95,
-                                 x + r * 1.95, y + r * 1.95],
-                                outline=_rgba(HILITE_RING, al), width=wd)
-            sp = _dot_sprite(ecol, rr, ring=True)
-            im.alpha_composite(sp, (int(x - sp.width / 2), int(y - sp.height / 2)))
-            # 名字：只在格子够大或悬停时画，否则太挤
-            if self.cell >= 30 or hov or hit:
-                # timeline 给的键是 enemy_name / label，早先这里读 "name"
-                # 永远为空，所以鼠标悬停看不到名字。
+                    ex += math.cos(ang) * off
+                    ey += math.sin(ang) * off
+
+                ecol = en.get("color") or (240, 96, 90)
+                if isinstance(ecol, str):
+                    ecol = _name_color(ecol)
+                hov = (self.hover_enemy == i)
+                hit = self._is_highlighted(en)
+                rr = r * (1.32 if hov else 1.0)
+
+                if hit:
+                    gr = r * 3.2
+                    glow = Image.new("RGBA", (int(gr * 2), int(gr * 2)),
+                                      (0, 0, 0, 0))
+                    gd = ImageDraw.Draw(glow)
+                    cx = cy = gr
+                    for k in range(6, 0, -1):
+                        t = k / 6.0
+                        gd.ellipse([cx - gr * t, cy - gr * t,
+                                    cx + gr * t, cy + gr * t],
+                                   fill=_rgba(HILITE_GLOW,
+                                               int(46 * (1 - t) + 14)))
+                    im.alpha_composite(glow, (int(ex - gr), int(ey - gr)))
+                    for wd, al in ((3, 235), (1, 255)):
+                        draw.ellipse([ex - r * 1.95, ey - r * 1.95,
+                                     ex + r * 1.95, ey + r * 1.95],
+                                    outline=_rgba(HILITE_RING, al), width=wd)
+
+                sp = _get_dot(ecol, rr)
+                im.alpha_composite(sp, (round(ex - sp.width / 2),
+                                        round(ey - sp.height / 2)))
+
+                # 被干员阻挡时画一圈橙色环
+                if en.get("blocked"):
+                    draw.ellipse([ex - rr * 1.5, ey - rr * 1.5,
+                                    ex + rr * 1.5, ey + rr * 1.5],
+                                   outline=_rgba((255, 165, 0), 220),
+                                   width=max(2, int(rr * 0.3)))
+
+                # 名字始终画在圆点旁边，便于辨识
                 name = (en.get("enemy_name") or en.get("label")
                         or en.get("name") or "")
                 if name:
-                    fx, fy = int(x + rr + 3), int(y)
-                    dd = ImageDraw.Draw(im)
-                    # 高亮时名字用高亮色 + 更粗描边，方便在密集处找到它
-                    dd.text((fx, fy), name, font=_font(fs, hit),
-                            fill=_rgba(HILITE_RING if hit else TEXT),
+                    fx, fy = int(ex + rr + 3), int(ey)
+                    draw.text((fx, fy), name, font=_font(fs, hit or hov),
+                            fill=_rgba(HILITE_RING if (hit or hov) else TEXT),
                             anchor="lm", stroke_width=2,
                             stroke_fill=_rgba((10, 12, 18)))
 

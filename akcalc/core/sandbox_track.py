@@ -37,6 +37,17 @@ SP_ATTACK = "ATTACK"      # 攻击回复（打一下回一点，阻回时也回�
 SP_DEFENSE = "DEFENSE"    # 受击回复
 SP_NONE = "NONE"          # 不回复（一次性技能）
 
+#: 触发方式。取自解包 ``skill_table_full.json`` 的 ``skillType``
+#: （``AUTO`` / ``MANUAL`` / ``PASSIVE``），也兼容 PRTS 的
+#: ``技能类型2``（「自动触发」/「手动触发」）。
+#:
+#: **这是「谁决定技能开启」的问题，和 ``recover``（SP 怎么涨）正交**：
+#: 自然回复 + 手动触发（银灰真银斩）、攻击回复 + 自动触发（克洛丝
+#: 二连射）都真实存在，不能用一个字段同时表达。
+TRIG_AUTO = "AUTO"        # 自动触发：SP 一满立刻自己开，玩家不能选择时机
+TRIG_MANUAL = "MANUAL"    # 手动触发：SP 满了要玩家点，什么时候开是用户决定的
+TRIG_PASSIVE = "PASSIVE"  # 被动：落地生效，没有「开启」这个动作
+
 #: 部署动作类型
 ACT_DEPLOY = "deploy"
 ACT_RETREAT = "retreat"
@@ -52,15 +63,50 @@ class SkillCycle:
     duration: float = 0.0         # 技能持续时间（秒）
     recover: str = SP_AUTO        # 回复类型
     infer_attack: bool = False    # 是否按攻击间隔回复
+    # B3 §6.4: 可充能次数（maxChargeTime，默认 1 = 普通）
+    max_charge: int = 1
+    # B3 §6.5: 持续类型（NONE / AMMO）
+    duration_type: str = "NONE"
+    # B3 §6.5: 弹药数（从 blackboard attack@trigger_time 取）
+    ammo: int = 0
+    #: 触发方式，见 ``TRIG_*``。默认 ``MANUAL``：宁可让用户自己点，
+    #: 也不要把「理论最早可开」画成「真的开了」——后者会让用户误以为
+    #: 轴上的技能段是既成事实。
+    trigger: str = TRIG_MANUAL
+
+    @property
+    def is_auto_trigger(self) -> bool:
+        """是不是「SP 满自动开」。只有这类才允许在轴上画推演出来的循环。"""
+        return self.trigger == TRIG_AUTO
+
+    @property
+    def is_manual_trigger(self) -> bool:
+        return self.trigger == TRIG_MANUAL
 
     @property
     def is_passive(self) -> bool:
-        return self.sp_cost <= 0
+        """没有「开启」这个动作。
+
+        两种来源都算：``skillType == PASSIVE``（解包直接标注），
+        或 ``sp_cost <= 0``（老数据/PRTS 没给消耗，等价于不需要 SP）。
+        不能只看后者——有技能的 ``spCost`` 恰好是 0 但它仍需手动开启。
+        """
+        return self.trigger == TRIG_PASSIVE or self.sp_cost <= 0
 
     @property
     def is_continuous(self) -> bool:
         """持续到手动关闭（duration<=0 但 sp_cost>0）。"""
-        return self.sp_cost > 0 and self.duration <= 0
+        return self.sp_cost > 0 and self.duration <= 0 and self.duration_type != "AMMO"
+
+    @property
+    def is_ammo(self) -> bool:
+        """B3 §6.5: 弹药技能（durationType == AMMO）。"""
+        return self.duration_type == "AMMO" and self.ammo > 0
+
+    @property
+    def sp_max(self) -> float:
+        """B3 §6.4: SP 上限 = sp_cost × max_charge。"""
+        return float(self.sp_cost * max(1, self.max_charge))
 
 
 @dataclass
@@ -198,21 +244,32 @@ class SkillSim:
                boost: float = 0.0) -> List[Tuple[float, float, float]]:
         """算出 [start, end_time] 内的技能轮次。
 
-        返回 ``[(ready_at, active_from, active_to), ...]``：
-        ``ready_at`` 是 SP 攒满的时刻，``active_from`` 是技能实际开始
-        （玩家通常 SP 满了就开，所以这里就取 ready_at），``active_to``
-        是持续结束时刻。持续型技能 ``active_to`` 给 ``end_time``。
-
-        没有 SP 数据（被动或解析失败）时返回空列表。
+        返回 ``[(ready_at, active_from, active_to), ...]``。
+        B3 §6.3-6.5 增强：
+        - 攻击/受击回复技能在持续期间继续回 SP（recover_in_skill）
+        - 可充能技能（max_charge > 1）SP 上限抬高
+        - 弹药技能（AMMO）持续时间 = ammo × attack_interval
         """
         if sk.is_passive or sk.sp_cost <= 0:
             return []
-        sp = max(0.0, float(sk.init_sp))
+        sp_max = sk.sp_max  # B3 §6.4: 可充能时上限更高
+        sp = max(0.0, min(float(sk.init_sp), sp_max))
         t = max(0.0, float(start))
         end_time = max(t, float(end_time))
         rate = self.sp_rate(sk, boost)
         out: List[Tuple[float, float, float]] = []
         guard = 0
+
+        # B3 §6.5: 弹药技能的「持续时间」= ammo × attack_interval
+        if sk.is_ammo:
+            ammo_dur = max(sk.ammo, 1) * self.attack_interval
+            # 弹药技能只开一次就结束（不循环），因为弹药耗尽后退出
+            if sp >= sk.sp_cost:
+                ready = t
+                active_to = min(end_time, ready + ammo_dur)
+                out.append((ready, ready, active_to))
+            return out
+
         while t < end_time and guard < 999:
             guard += 1
             if sp >= sk.sp_cost:
@@ -222,16 +279,23 @@ class SkillSim:
                     break
                 active_to = min(end_time, ready + max(0.0, sk.duration))
                 out.append((ready, ready, active_to))
-                # 技能结束后 SP 归零，从结束时刻继续攒
-                t = active_to
-                sp = 0.0
+                # B3 §6.3: 攻击/受击回复在技能期间继续回 SP
+                recover_in_skill = (sk.recover in (SP_ATTACK, SP_DEFENSE))
+                if recover_in_skill:
+                    carry = (active_to - ready) * rate
+                    t = active_to
+                    sp = min(sp_max, carry)
+                else:
+                    # 阻回：技能结束后 SP 归零
+                    t = active_to
+                    sp = 0.0
                 continue
             if rate <= 0:
                 break
             need = sk.sp_cost - sp
             dt = need / rate
             t += dt
-            sp = sk.sp_cost
+            sp = min(sp_max, sk.sp_cost)  # B3 §6.4: 不超过可充能上限
         return out
 
     def state_at(self, sk: SkillCycle, seconds: float,
@@ -240,21 +304,25 @@ class SkillSim:
         """某时刻的技能状态，给悬停提示用。
 
         返回 ``{"ready": bool, "sp": float, "need": float,
-        "active": bool, "next_in": float|None, "cycle_index": int}``。
+        "active": bool, "next_in": float|None, "cycle_index": int,
+        "charges": int}``。
+        B3 §6.4: charges = 当前充能层数（floor(sp / sp_cost)）。
         """
+        sp_max = sk.sp_max
         st = {"ready": False, "sp": 0.0, "need": float(sk.sp_cost),
               "active": False, "next_in": None, "cycle_index": 0,
-              "passive": sk.is_passive}
+              "passive": sk.is_passive, "charges": 0}
         if sk.is_passive or sk.sp_cost <= 0:
             st["ready"] = True
             return st
         rate = self.sp_rate(sk, boost)
-        sp = max(0.0, float(sk.init_sp))
+        sp = max(0.0, min(float(sk.init_sp), sp_max))
         t = max(0.0, float(start))
         seconds = float(seconds)
         if seconds <= t:
             st["sp"] = sp
             st["ready"] = sp >= sk.sp_cost
+            st["charges"] = int(sp // sk.sp_cost) if sk.sp_cost > 0 else 0
             st["next_in"] = max(0.0, (sk.sp_cost - sp) / rate) if rate else None
             return st
         idx = 0
@@ -263,34 +331,48 @@ class SkillSim:
             guard += 1
             if sp >= sk.sp_cost:
                 if sk.is_continuous:
-                    st.update(ready=True, active=True, sp=sk.sp_cost,
-                              cycle_index=idx, next_in=None)
+                    st.update(ready=True, active=True, sp=sp,
+                              cycle_index=idx, next_in=None,
+                              charges=int(sp // sk.sp_cost))
                     return st
                 active_to = t + max(0.0, sk.duration)
+                # B3 §6.5: 弹药技能的 active_to 用 ammo 计算
+                if sk.is_ammo:
+                    active_to = min(active_to,
+                                    t + max(sk.ammo, 1) * self.attack_interval)
                 if seconds < active_to:
-                    st.update(ready=True, active=True, sp=0.0,
+                    st.update(ready=True, active=True, sp=sp,
                               cycle_index=idx,
-                              next_in=max(0.0, active_to - seconds))
+                              next_in=max(0.0, active_to - seconds),
+                              charges=int(sp // sk.sp_cost))
                     return st
                 t = active_to
-                sp = 0.0
+                # B3 §6.3: 攻击/受击回复在持续期间继续回 SP
+                recover_in_skill = (sk.recover in (SP_ATTACK, SP_DEFENSE))
+                if recover_in_skill:
+                    carry = (active_to - t) * rate
+                    sp = min(sp_max, carry)
+                else:
+                    sp = 0.0
                 idx += 1
                 continue
             if rate <= 0:
-                st.update(sp=sp, ready=False, next_in=None)
+                st.update(sp=sp, ready=False, charges=int(sp // sk.sp_cost) if sk.sp_cost > 0 else 0)
                 return st
             dt = (sk.sp_cost - sp) / rate
             if t + dt > seconds:
                 sp += (seconds - t) * rate
+                sp = min(sp_max, sp)
                 t = seconds
                 break
             t += dt
-            sp = sk.sp_cost
-        st["sp"] = min(sp, sk.sp_cost)
+            sp = min(sp_max, sk.sp_cost)
+        st["sp"] = min(sp, sp_max)
         st["ready"] = sp >= sk.sp_cost
         st["cycle_index"] = idx
+        st["charges"] = int(st["sp"] // sk.sp_cost) if sk.sp_cost > 0 else 0
         if not st["ready"] and rate > 0:
-            st["next_in"] = max(0.0, (sk.sp_cost - sp) / rate)
+            st["next_in"] = max(0.0, (sk.sp_cost - st["sp"]) / rate)
         return st
 
 
@@ -433,6 +515,17 @@ class CoarseTrack:
                 }
                 if sk.infer_attack:
                     item["skill_sp"]["infer_attack"] = True
+                # B3 §6.4-6.5: 新字段序列化
+                if sk.max_charge > 1:
+                    item["skill_sp"]["max_charge"] = int(sk.max_charge)
+                if sk.duration_type and sk.duration_type != "NONE":
+                    item["skill_sp"]["duration_type"] = sk.duration_type
+                if sk.ammo > 0:
+                    item["skill_sp"]["ammo"] = int(sk.ammo)
+                # 触发方式必须落盘：不存的话导入回来一律是默认 MANUAL，
+                # 自动触发的技能在轴上就画不出推演段了。
+                if sk.trigger and sk.trigger != TRIG_MANUAL:
+                    item["skill_sp"]["trigger"] = str(sk.trigger)
             if d.skill_uses:
                 item["skill_uses"] = [round(float(t), 3) for t in d.skill_uses]
             if d.cost:
@@ -608,6 +701,13 @@ def _deployment_from_dict(item: dict) -> Optional[Deployment]:
                 duration=max(0.0, _as_float(sp.get("dur"), 0.0)),
                 recover=str(sp.get("recover") or "AUTO"),
                 infer_attack=bool(sp.get("infer_attack")),
+                # B3 §6.4-6.5: 新字段（老文件没有就取默认值）
+                max_charge=max(1, _as_int(sp.get("max_charge"), 1)),
+                duration_type=str(sp.get("duration_type") or "NONE"),
+                ammo=max(0, _as_int(sp.get("ammo"), 0)),
+                # 老文件没有 trigger：保持 MANUAL（默认值），这样手动
+                # 技能不会被误画成自动循环，最坏情况只是少画推演段。
+                trigger=str(sp.get("trigger") or TRIG_MANUAL),
             )
         except Exception:                                  # noqa: BLE001
             pass

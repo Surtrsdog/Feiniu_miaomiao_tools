@@ -374,6 +374,26 @@ class Route:
 
 
 @dataclass
+class Device:
+    """关卡预置装置（predefines.tokenInsts 的一条）。
+
+    位置行列与 GameMap.tiles 同序（都已自上而下），不需要再翻转。
+    """
+    row: int
+    col: int
+    token_key: str            # "trap_027_stone"
+    alias: str                # "trap_027_stone#1"
+    direction: str            # "UP"
+    hidden: bool              # 该实例自己的 hidden
+    category: str             # "A"/"B"/"C"/"D"
+    affects_route: bool
+    block_cnt: int
+    max_hp: int
+    operable: bool
+    stack_size: int = 1       # 同格 hidden 堆叠数（N 选 1）
+
+
+@dataclass
 class GameMap:
     """关卡地图。"""
 
@@ -393,6 +413,21 @@ class GameMap:
     options: Dict[str, float] = field(default_factory=dict)
     #: 原始 tile 定义表（tileKey -> 属性），便于查代价
     tile_defs: List[Dict] = field(default_factory=list)
+    #: 关卡预置装置。同格 hidden 堆叠已聚合为 1 条，stack_size 记原堆叠数
+    devices: List[Device] = field(default_factory=list)
+
+    def device_at(self, row: int, col: int) -> Optional[Device]:
+        for d in self.devices:
+            if d.row == row and d.col == col:
+                return d
+        return None
+
+    def route_blocking_cells(self) -> set:
+        """所有 affects_route=True 的装置格。传给 analyze_all(blocked=...)。"""
+        return {(d.row, d.col) for d in self.devices if d.affects_route}
+
+    def operable_devices(self) -> List[Device]:
+        return [d for d in self.devices if d.operable]
 
     def tile_at(self, row: int, col: int) -> Optional[Tile]:
         if 0 <= row < self.height and 0 <= col < self.width:

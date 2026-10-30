@@ -1,0 +1,321 @@
+# 新约能天使 — 技能判定说明
+
+> 数据来源：明文 JSON（`character_table` / `skill_table` / `range_table` / `buff_template_data` / `bakemuzzledata`）。不含反汇编或二进制解析内容。
+
+## 一、干员底子
+
+| 项 | 值 |
+|---|---|
+| ID | `char_1041_angel2` |
+| 职业 | 特种 / `geek` |
+| 星级 | 6 星 |
+| 生命（精二满级） | 2150 |
+| 攻击（精二满级） | 708 |
+| 防御（精二满级） | 150 |
+| 法抗 | 1000% |
+| **攻击间隔 baseAttackTime** | **1.3 秒** |
+| 攻速 attackSpeed | 100（100% = 无增减） |
+| 阻挡 | 1 |
+| 部署费用 | 13 |
+
+**攻击间隔换算**（全干员通用）：
+
+```
+实际间隔 = baseAttackTime ÷ (attackSpeed / 100)
+         = 1.3 ÷ 1.00 = 1.300 秒
+```
+
+## 二、抬手（攻击前摇）
+
+来源：`bakemuzzledata/character/char_1041_angel2_*.json` → `bakedAnimDatas.<组>.bakedEvents.<动画名>.eventTime`，取事件 `OnAttack` 时刻。
+
+| 场景 | 动画名 | 抬手 | 帧数(30fps) |
+|---|---|---|---|
+| **普通攻击** | `Attack_Loop` | **0.266667 秒** | 8 帧 |
+
+> 占攻击间隔 20.5%（0.266667 秒 / 1.3 秒）。开技能不会让抬手变快。
+
+| 技能动画 | `Skill_1_Close` | 0.266667 秒 | 8 帧 |
+| 技能动画 | `Skill_1_Loop` | 0.266667 秒 | 8 帧 |
+| 技能动画 | `Skill_2_Loop` | 0.166667 秒 | 5 帧 |
+| 技能动画 | `Skill_3_Loop` | 0.166667 秒 | 5 帧 |
+| 技能动画 | `Skill_3_Skill` | 0.066667 秒 | 2 帧 |
+| 技能动画 | `Skill_Down_1_Loop` | 0.266667 秒 | 8 帧 |
+| 技能动画 | `Skill_Down_2_Loop` | 0.166667 秒 | 5 帧 |
+| 技能动画 | `Skill_Down_3_Loop` | 0.166667 秒 | 5 帧 |
+
+
+## 三、技能逐层拆解
+
+---
+
+### 天空大扫除　`skchr_angel2_1`
+
+**技能描述（最高级）：**
+
+> 每次攻击造成攻击力250%的物理伤害，优先攻击空中单位，主动关闭时发射剩余所有弹药攻击范围内的随机敌人
+> 攻击装有8发弹药，打完后结束（可随时停止技能）
+
+
+#### 触发条件
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| SP 回复 | `INCREASE_WITH_TIME` | 随时间自动回复 |
+| 初始 SP / 消耗 SP | 8 / 12 | 部署即刻拥有 / 每次开启扣除 |
+| 充能层数 | 1 | 可存层数 |
+| 释放方式 | `AUTO` | 自动释放 |
+| 技能形态 | `弹药制` | 技能持续到弹药打完 |
+| duration / durationType | -1 / `AMMO` | 原始字段 |
+
+#### 数值（最高级）
+
+| blackboard 键 | 值 |
+|---|---|
+| `attack@atk_scale` | 2.5 |
+| `attack@trigger_time` | 8 |
+| `range_id` | 0 |
+
+#### 攻击范围
+
+`rangeId = 3-3`，12 格（direction=1）
+
+> 该技能未指定自己的 `rangeId`，上图是干员**自身范围**。技能若扩大范围，会另有 `rangeId`。
+
+```
+■ ■ ■ ■ 
+■ ■ ■ ■ 
+■ ■ ■ ■ 
+```
+
+#### 判定链
+
+> 匹配方式：按命名规则匹配（层级 B）
+
+**`angel2_s_1[ammo_assign]`** ← 事件 `ON_BUFF_START`
+
+- **AssignAmmoSkillRemainingCountToBB** `_targetType`="BUFF_OWNER"
+- **ModifyAbilityBlackboard** 
+
+**`angel2_s_1[counter]`** ← 事件 `ON_BUFF_START`
+
+- **AssignAmmoSkillRemainingCountToBB** `_targetType`="BUFF_OWNER"
+- **AssignBuffBlackboard** `_targetType`="BUFF_OWNER"
+
+**`angel2_s_1[finish]`** ← 事件 `ON_BUFF_START`
+
+- **SwitchMode** `_modeIndex`=0 `_targetType`="BUFF_OWNER"
+
+**`angel2_s_1[switch_mode]`** ← 事件 `ON_BUFF_START`
+
+- **SwitchMode** `_modeIndex`=5 `_targetType`="BUFF_OWNER"
+- **AssignValueToBB** 
+
+**`angel2_s_1[switch_mode]`** ← 事件 `ON_BUFF_FINISH`
+
+- **SwitchMode** `_modeIndex`=0 `_targetType`="BUFF_OWNER"
+
+---
+
+### 开火成瘾症　`skchr_angel2_2`
+
+**技能描述（最高级）：**
+
+> 立即偷取攻击范围内1名友方干员70点攻击速度（持续至技能结束或新约能天使离场），自身与其获得最大生命值250%的屏障，该屏障会持续衰减，攻击间隔降低，每次攻击造成攻击力300%的物理伤害
+> 攻击装有35发弹药，打完后结束（可随时停止技能），如果成功偷取攻击速度则额外获得5发弹药
+
+
+#### 触发条件
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| SP 回复 | `INCREASE_WITH_TIME` | 随时间自动回复 |
+| 初始 SP / 消耗 SP | 25 / 30 | 部署即刻拥有 / 每次开启扣除 |
+| 充能层数 | 1 | 可存层数 |
+| 释放方式 | `MANUAL` | 手动释放 |
+| 技能形态 | `弹药制` | 技能持续到弹药打完 |
+| duration / durationType | -1 / `AMMO` | 原始字段 |
+
+#### 数值（最高级）
+
+| blackboard 键 | 值 |
+|---|---|
+| `attack@atk_scale` | 3 |
+| `attack@trigger_time` | 35 |
+| `addtional_ammo_each` | 5 |
+| `max_target` | 1 |
+| `recover_each_cnt` | 5 |
+| `shield_max_hp_ratio` | 2.5 |
+| `shield_max_duration` | 30 |
+| `steal` | 70 |
+| `base_attack_time` | -0.7 |
+| `steal_max` | 999 |
+
+#### 攻击范围
+
+`rangeId = 3-3`，12 格（direction=1）
+
+> 该技能未指定自己的 `rangeId`，上图是干员**自身范围**。技能若扩大范围，会另有 `rangeId`。
+
+```
+■ ■ ■ ■ 
+■ ■ ■ ■ 
+■ ■ ■ ■ 
+```
+
+#### 判定链
+
+> 匹配方式：按命名规则匹配（层级 B）
+
+**`angel2_s_2[cleaner]`** ← 事件 `ON_BUFF_START`
+
+- **FinishBuffsOfEveryCharacterById** 
+
+**`angel2_s_2[select_target]`** ← 事件 `ON_BUFF_START`
+
+- **AmmoSkillCountModifier** `_targetType`="BUFF_SOURCE"
+- **FinishBuffsById** `_targetType`="BUFF_OWNER"
+- **CreateBuff** buffKey=`angel2_s_2[shield]` templateKey=`angel2_s_2[shield]` `lifeTimeType`=INFINITY
+
+**`angel2_s_2[select_target]`** ← 事件 `ON_BUFF_FINISH`
+
+- **AmmoSkillCountModifier** `_targetType`="BUFF_SOURCE"
+
+**`angel2_s_2[shield]`** ← 事件 `ON_BUFF_START`
+
+- **AssignAttributeToBB** `_targetType`="BUFF_SOURCE"
+- **AssignValueToBB** 
+- **CalculateBlackboardValueViaParams** 
+
+**`angel2_s_2[shield]`** ← 事件 `ON_TAKE_DAMAGE`
+
+- **BlockDamage** 
+- **FilterByBlackboardValue** `_condType`="LE" `_targetType`="BUFF_OWNER"
+- **FinishBuff** 
+
+**`angel2_s_2[shield]`** ← 事件 `ON_BUFF_TRIGGER`
+
+- **CalculateBlackboardValueViaParams** 
+- **FilterByBlackboardValue** `_condType`="LE" `_targetType`="BUFF_OWNER"
+- **FinishBuff** 
+
+**`angel2_s_2[shield][trigger]`** ← 事件 `ON_BUFF_START`
+
+- **FinishBuffsById** `_targetType`="BUFF_OWNER"
+- **CreateBuff** buffKey=`angel2_s_2[shield]` templateKey=`angel2_s_2[shield]` `lifeTimeType`=INFINITY
+
+**`angel2_s_2[steal]`** ← 事件 `ON_BUFF_START`
+
+- **TriggerAbility** `_targetType`="BUFF_OWNER"
+
+**`angel2_s_2[switch_mode]`** ← 事件 `ON_BUFF_START`
+
+- **IfElse** 
+  - **CheckCharacterDefaultDirection** `_target`="BUFF_OWNER"
+  - **SwitchMode** `_modeIndex`=2 `_targetType`="BUFF_OWNER"
+  - **SwitchMode** `_modeIndex`=1 `_targetType`="BUFF_OWNER"
+
+**`angel2_s_2[switch_mode]`** ← 事件 `ON_BUFF_FINISH`
+
+- **SwitchMode** `_modeIndex`=0 `_targetType`="BUFF_OWNER"
+
+---
+
+### 使命必达！　`skchr_angel2_3`
+
+**技能描述（最高级）：**
+
+> 攻击力+30%，每次攻击变为相当于攻击力160%的5连击，若存在投递坐标，立即对该处造成一次相当于攻击力250%的物理溅射伤害并将一名再部署时间最长的地面干员部署至该处，使其获得6点技力
+> 部署后获得投递坐标，攻击装有50发弹药，每次攻击消耗5发，打完后结束（可随时停止技能）
+
+
+#### 触发条件
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| SP 回复 | `INCREASE_WITH_TIME` | 随时间自动回复 |
+| 初始 SP / 消耗 SP | 30 / 35 | 部署即刻拥有 / 每次开启扣除 |
+| 充能层数 | 1 | 可存层数 |
+| 释放方式 | `MANUAL` | 手动释放 |
+| 技能形态 | `弹药制` | 技能持续到弹药打完 |
+| duration / durationType | -1 / `AMMO` | 原始字段 |
+
+#### 数值（最高级）
+
+| blackboard 键 | 值 |
+|---|---|
+| `attack@cannon_atk_scale` | 2.5 |
+| `attack@trigger_time` | 50 |
+| `max_deploy_character` | 99 |
+| `attack@atk_scale` | 1.6 |
+| `attack@sp` | 6 |
+| `atk` | 0.3 |
+
+#### 攻击范围
+
+`rangeId = 3-3`，12 格（direction=1）
+
+> 该技能未指定自己的 `rangeId`，上图是干员**自身范围**。技能若扩大范围，会另有 `rangeId`。
+
+```
+■ ■ ■ ■ 
+■ ■ ■ ■ 
+■ ■ ■ ■ 
+```
+
+#### 判定链
+
+> 匹配方式：按命名规则匹配（层级 B）
+
+**`angel2_s_3[card_eff]`** ← 事件 `ON_BUFF_START`
+
+- **AddCharacterSharedBlackboard** `_target`="TARGET"
+
+**`angel2_s_3[card_eff]`** ← 事件 `ON_BUFF_FINISH`
+
+- **WithdrawTokens** 
+
+**`angel2_s_3[shield]`** ← 事件 `ON_BUFF_START`
+
+- **AssignAttributeToBB** `_targetType`="BUFF_SOURCE"
+- **AssignValueToBB** 
+- **CalculateBlackboardValueViaParams** 
+
+**`angel2_s_3[shield]`** ← 事件 `ON_TAKE_DAMAGE`
+
+- **BlockDamage** 
+- **FilterByBlackboardValue** `_condType`="LE" `_targetType`="BUFF_OWNER"
+- **FinishBuff** 
+
+**`angel2_s_3[shield]`** ← 事件 `ON_BUFF_TRIGGER`
+
+- **CalculateBlackboardValueViaParams** 
+- **FilterByBlackboardValue** `_condType`="LE" `_targetType`="BUFF_OWNER"
+- **FinishBuff** 
+
+**`angel2_s_3[sp]`** ← 事件 `ON_BUFF_START`
+
+- **ModifySp** `_targetType`="BUFF_OWNER" `_forceFlag`=False
+
+**`angel2_s_3[switch_mode]`** ← 事件 `ON_BUFF_START`
+
+- **IfElse** 
+  - **CheckFaceDirection** `_target`="BUFF_OWNER"
+  - **SwitchMode** `_modeIndex`=4 `_targetType`="BUFF_OWNER"
+  - **SwitchMode** `_modeIndex`=3 `_targetType`="BUFF_OWNER"
+
+**`angel2_s_3[switch_mode]`** ← 事件 `ON_BUFF_FINISH`
+
+- **SwitchMode** `_modeIndex`=0 `_targetType`="BUFF_OWNER"
+
+---
+
+## 附：数据边界
+
+| 项目 | 状态 |
+|---|---|
+| 属性 / 数值 / SP / 范围 / 抬手 | ✅ 明文可得 |
+| buff 行为树 | ✅ 明文可得 |
+| 技能 → 模板绑定 | ⚠️ 游戏只给 `prefabId`，真实绑定在不可解的 `.ab` 里；本文按命名规律 + `blackboard` 键名双向推断 |
+| 动画资源本体 | ❌ 在 `.ab` 包内，不可解 |
+| 抬手精度 | ✅ 1/30 秒，是动画事件时刻而非视觉起手帧 |

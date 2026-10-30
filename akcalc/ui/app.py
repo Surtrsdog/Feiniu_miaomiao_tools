@@ -21,7 +21,7 @@ from ..core import settings as SET
 from ..core import single_instance as SI
 from ..core.paths import Paths
 from .damage_panel import DamagePanel
-from .data_index import FieldsIndexView, MonsterIndexView, OperatorIndexView
+from .data_index import MonsterIndexView, OperatorIndexView
 from .home_panel import HomePanel
 from .path_panel import PathPanel
 from .settings_dialog import SettingsDialog
@@ -236,10 +236,9 @@ class App(tk.Tk):
         self._path_panel = None
         self._sandbox_panel = None
 
-        # 数据索引两栏：延迟构建，首次进入才建，避免启动时白等。
+        # 数据索引：延迟构建，首次进入才建，避免启动时白等。
         self._op_view = None
         self._monster_view = None
-        self._field_view = None
 
         self._views = {
             "home": self.home_panel,
@@ -350,11 +349,6 @@ class App(tk.Tk):
                 self._monster_view = MonsterIndexView(self._view_wrap, self)
                 self._views["monster_index"] = self._monster_view
             return self._monster_view
-        if key == "field_index":
-            if self._field_view is None:
-                self._field_view = FieldsIndexView(self._view_wrap, self)
-                self._views["field_index"] = self._field_view
-            return self._field_view
         if key == "damage":
             if self._damage_panel is None:
                 self._damage_panel = DamagePanel(self._view_wrap, self)
@@ -781,13 +775,41 @@ class App(tk.Tk):
 
 
 def main() -> None:
+    # --mcp：以 MCP 服务端模式运行（stdio 传输），供外接 AI 读取数据。
+    # 必须在建窗口、抢单实例锁**之前**处理：
+    #   * 抢锁的话，用户开着软件时 AI 就永远连不上；
+    #   * 建 Tk 会凭空弹一个窗口，且 stdio 服务不该有 GUI 依赖。
+    if "--mcp" in sys.argv:
+        from ..mcp.server import main as _mcp_main
+        raise SystemExit(_mcp_main([a for a in sys.argv[1:] if a != "--mcp"]))
+
     # 单实例：本程序会用一份共享缓存，开两个会互相踩，所以第二个直接退出。
     # --selftest-compare 是自动化自检入口，不做这个限制。
     if "--selftest-compare" not in sys.argv and "--allow-multi" not in sys.argv:
         if not SI.acquire():
             SI.warn_already_running()
             return
-    app = App()
+    try:
+        app = App()
+    except Exception as e:
+        import traceback as _tb
+        msg = "App 初始化失败：\n" + _tb.format_exc()
+        try:
+            with open(os.path.join(os.path.dirname(
+                getattr(sys, "executable", ".")), "akcalc_error.log"),
+                "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception:
+            pass
+        try:
+            import tkinter as _tk
+            from tkinter import messagebox as _mb
+            r = _tk.Tk(); r.withdraw()
+            _mb.showerror("启动失败", msg[-1500:])
+            r.destroy()
+        except Exception:
+            pass
+        return
     # 开发自检：--selftest-compare 自动开对比模式并填 5 位，用于打包后验证
     if "--selftest-compare" in sys.argv:
         app.after(600, lambda: _selftest_compare(app))

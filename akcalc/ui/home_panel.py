@@ -43,10 +43,6 @@ EXTRA = [
     ("monster_index", "怪物数据图鉴",
      "按名字检索敌人，查看特性、技能与各类抗性。",
      ACCENT),
-    ("field_index", "数据字段图鉴",
-     "解包数据的 145 个字段 / 200 个 blackboard token 逐条解释，\n"
-     "按名字搜索，看清 attributes、prefabKey 这些键到底存什么。",
-     ACCENT),
 ]
 
 

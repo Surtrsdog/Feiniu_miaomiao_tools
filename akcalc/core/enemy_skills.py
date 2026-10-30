@@ -923,9 +923,9 @@ OPSKILL_FIELD_DESC = {
 def load_statemachines(app) -> Dict[str, dict]:
     """``codex_fields.json`` 的 ``statemachines`` 索引：``{skill_id: record}``。
 
-    这是**唯一**能说明「技能内部怎么跑」的数据（525 条，覆盖有状态机的
-    干员技能）。敌人技能没有对应条目——所以敌人侧的注解必须明说「实现
-    不在解包数据里」，不能拿干员状态机去套。
+    这是**唯一**能说明「技能内部怎么跑」的数据（覆盖全部可建模的干员技能：
+    自然回复 / 攻击回复 / 受击回复三类）。敌人技能没有对应条目——所以敌人
+    侧的注解必须明说「实现不在解包数据里」，不能拿干员状态机去套。
     """
     try:
         raw = app._read_bundled_json("codex_fields.json") or {}
@@ -1050,7 +1050,7 @@ def annotate_operator_skill(skill_id: str, level: dict,
         if state.get("pitfall"):
             out["sp_notes"].append("易错点：%s" % clean(state["pitfall"]))
     elif out["instructions"]:
-        # 有指令但没状态机：说明这条技能的技能 ID 不在 525 条 statemachines
+        # 有指令但没状态机：说明这条技能的技能 ID 不在 statemachines
         # 里（多为新技能或召唤物技能）。如实说明，别让人以为漏读。
         out["sp_notes"].append(
             "codex_fields.json 的 statemachines 里没有这条技能的生命周期记录，"
@@ -1196,7 +1196,7 @@ def skill_annotation(app, enemy_id: str, skills, talent=None) -> List[dict]:
     用户想看的是「这个技能在代码里到底怎么跑的」。解包数据里**没有**
     这个东西：``enemy_database.json`` 只有 ``prefabKey``（客户端注册的
     行为类名，如 ``DanceFire``）和一袋 ``blackboard`` 数值；敌人技能也
-    没有 ``codex_fields.json`` 的 ``statemachines`` 条目（那 525 条全是
+    没有 ``codex_fields.json`` 的 ``statemachines`` 条目（那里只收录
     干员技能）。真正的指令在客户端二进制里。
 
     所以这里只做能诚实做到的事：把每个 key 的中文释义查出来、查不到就

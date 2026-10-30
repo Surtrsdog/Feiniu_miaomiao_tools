@@ -164,6 +164,92 @@ def _norm_passable(mask) -> str:
     return "ALL"
 
 
+# --------------------------------------------------------------- 装置
+
+_TOKEN_CATALOG_CACHE = None
+
+
+def _token_catalog() -> dict:
+    """懒加载 token_catalog.json。文件缺失返回空 dict（降级为全 D 类）。"""
+    global _TOKEN_CATALOG_CACHE
+    if _TOKEN_CATALOG_CACHE is not None:
+        return _TOKEN_CATALOG_CACHE
+    import json
+    import os
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "data", "token_catalog.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            _TOKEN_CATALOG_CACHE = json.load(f).get("tokens", {})
+    except Exception:
+        _TOKEN_CATALOG_CACHE = {}
+    return _TOKEN_CATALOG_CACHE
+
+
+def _make_device(it: dict, r: int, c: int, cat: dict,
+                 hidden: bool, stack: int) -> "Device":
+    """从一条 tokenInst 构造 Device。"""
+    from .models import Device
+    key = (it.get("inst") or {}).get("characterKey") or ""
+    info = cat.get(key, {})
+    direction = it.get("direction") or "NONE"
+    if isinstance(direction, dict):
+        direction = direction.get("row", "NONE")
+    # alias 形如 "trap_027_stone#1"
+    seq = it.get("inst", {}).get("seq", {})
+    alias = "%s#%s" % (key, seq) if seq else key
+    return Device(
+        row=r, col=c,
+        token_key=key,
+        alias=str(alias),
+        direction=str(direction or "NONE"),
+        hidden=bool(hidden),
+        category=str(info.get("category", "D")),
+        affects_route=bool(info.get("affects_route", False)),
+        block_cnt=int(info.get("block_cnt", 0) or 0),
+        max_hp=int(info.get("max_hp", 0) or 0),
+        operable=bool(info.get("operable", False)),
+        stack_size=int(stack),
+    )
+
+
+def _parse_devices(data: dict) -> list:
+    """从 predefines.tokenInsts 解析装置，同格 hidden 堆叠聚合。"""
+    from .models import Device  # noqa: F401
+    pre = data.get("predefines")
+    if not isinstance(pre, dict):
+        return []
+    insts = pre.get("tokenInsts") or []
+    if not isinstance(insts, list):
+        return []
+    cat = _token_catalog()
+    cells: dict = {}
+    for it in insts:
+        if not isinstance(it, dict):
+            continue
+        key = (it.get("inst") or {}).get("characterKey")
+        pos = it.get("position") or {}
+        r, c = pos.get("row"), pos.get("col")
+        if key is None or r is None or c is None:
+            continue
+        try:
+            r, c = int(r), int(c)
+        except (TypeError, ValueError):
+            continue
+        cells.setdefault((r, c), []).append(it)
+    out: list = []
+    for (r, c), group in cells.items():
+        vis = [x for x in group if not x.get("hidden")]
+        hidden_n = len(group) - len(vis)
+        if vis:
+            for x in vis:
+                out.append(_make_device(x, r, c, cat, hidden=False, stack=1))
+        else:
+            out.append(_make_device(group[0], r, c, cat,
+                                    hidden=True, stack=max(1, hidden_n)))
+    return out
+
+
 # --------------------------------------------------------------- 解析
 
 def parse_level(data: dict, level_id: str = "") -> GameMap:
@@ -180,6 +266,9 @@ def parse_level(data: dict, level_id: str = "") -> GameMap:
     # 若不翻转，出怪口与目标点会错位到地图另一侧，表现为大量路线不可达。
     # 实测（26 个内置关卡、828 条路线）：
     #   不翻转 -> 696/828 可达；翻转 -> 828/828 可达，且无任何关卡变差。
+    # 注：接入预置装置后（2026-10-28），部分含 A 类装置的关卡路线会因
+    # 装置阻挡而变长或变不可达——这是正确行为（装置挡路，敌人需绕行）。
+    # 用 analyze_all(include_devices=False) 可复现装置接入前的旧基线。
     # ------------------------------------------------------------------
     matrix = list(reversed(matrix))
 
@@ -226,6 +315,9 @@ def parse_level(data: dict, level_id: str = "") -> GameMap:
                 gm.spawn_tiles.append((r, c))
             elif k in GOAL_KEYS:
                 gm.goal_tiles.append((r, c))
+
+    # ---- 预置装置（predefines.tokenInsts）
+    gm.devices = _parse_devices(data)
 
     # ---- 路线
     # 注意：motionMode=E_NUM 是剧情/占位路线（起点终点均为 (0,0)），

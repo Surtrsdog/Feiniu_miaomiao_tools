@@ -38,6 +38,23 @@ def _mv(attr) -> float:
     return 0.0
 
 
+def _ms(attr, default: str = "") -> str:
+    """取属性里的 m_value，但保持字符串（``_mv`` 会转 float，不适用）。
+
+    enemy_database 里几乎所有字段都包一层
+    ``{"m_defined": true, "m_value": ...}``，``motion`` 就是典型：
+    裸写 ``str(motion)`` 得到的是字典的 repr，跟 ``"FLY"`` 永远不等。
+    """
+    if isinstance(attr, dict):
+        v = attr.get("m_value")
+        if v is None:
+            return default
+        return str(v)
+    if attr is None:
+        return default
+    return str(attr)
+
+
 def _pick(override: Optional[dict], base: dict, key: str):
     """优先取 overwrittenData 中被显式定义的字段。"""
     if override:
@@ -154,7 +171,11 @@ def parse_enemy_data(enemy_id: str, entry: dict,
             return _mv(ov[key])
         return _mv(attrs.get(key))
 
-    motion = data.get("motion") or ""
+    # motion 是 m_defined 包装：{'m_defined': True, 'm_value': 'FLY'}。
+    # 原先写成 str(motion).upper() == "FLY"，拿字典的 repr 去比字符串，
+    # 永远不成立 —— 全库 183 个飞行敌人的 is_flying 因此全是 False，
+    # 沙盘的飞行判定与阻挡跟着一起错。_mv() 就是为这种包装写的。
+    motion = _ms(data.get("motion"), "WALK").upper()
     ev = EnemyStats(
         enemy_id=enemy_id,
         name=name,
@@ -166,7 +187,7 @@ def parse_enemy_data(enemy_id: str, entry: dict,
         weight=attr("massLevel") or attr("weight"),
         block_cost=int(attr("blockCnt") or 1),
         attack_interval=attr("baseAttackTime") or 1.5,
-        is_flying=(str(motion).upper() == "FLY"),
+        is_flying=(motion == "FLY"),
         damage_type="PHYSICAL",
         spawn_unmovable=spawn_unmovable_of_ref(
             {"id": enemy_id, "overwrittenData": override}),

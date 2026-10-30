@@ -24,6 +24,10 @@ import urllib.request
 #: GitHub 仓库（发版后填实际地址）
 REPO = "Surtrsdog/Feiniu_miaomiao_tools"
 
+#: 当前版本号。发版只改这一处 —— 之前它只在 ui/settings_dialog.py 里定义，
+#: 而 web 界面不该反向依赖 ui 包，所以挪到 core 统一放。
+APP_VERSION = "2.5beta"
+
 #: Releases API。
 #:
 #: **不能用 ``/releases/latest``**：那个接口按 GitHub 的定义只返回

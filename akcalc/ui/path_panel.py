@@ -39,6 +39,7 @@ from .widgets import (ACCENT, ACCENT_SOFT, ACCENT_TXT, BG, BG_DEEP, BG_INPUT,
 _CAT_ACCENT = {
     "main":       ACCENT,
     "sidestory":  ACCENT,
+    "interlude":  ACCENT,
     "branchline": ACCENT,
     "activity":   ACCENT,
     "weekly":     ACCENT,
@@ -164,7 +165,10 @@ class PathPanel(ttk.Frame):
         self._clear_trail()
 
     def _wheel(self, event, delta):
-        """滚轮：Windows 下 event.delta 是 120 的倍数。"""
+        """滚轮：Windows 下 event.delta 是 120 的倍数。
+
+        方向：滚轮向下 → 页面向下（与 Windows 标准一致）。
+        """
         step = -1 if event.delta > 0 else 1
         self._cat_canvas.yview_scroll(step * 2, "units")
 
@@ -464,6 +468,7 @@ class PathPanel(ttk.Frame):
 
         self.canvas = MapCanvas(left)
         self.canvas.pack(fill="both", expand=True)
+        self.canvas.set_paths(self.app.paths)  # B5: 注入路径以加载干员头像
         self.canvas.on_cell_click = self._on_cell_click
         self.canvas.on_hover = self._on_hover
         self.canvas.on_enemy_click = self._on_enemy_click
@@ -970,7 +975,7 @@ class PathPanel(ttk.Frame):
 
     def _on_spawn_wheel(self, ev) -> None:
         try:
-            self.spawn_canvas.yview_scroll(int(-ev.delta / 120), "units")
+            self.spawn_canvas.yview_scroll(-int(ev.delta / 120), "units")
         except Exception:
             pass
 
@@ -1242,7 +1247,7 @@ class PathPanel(ttk.Frame):
                      + counts.get("ACTIVATE_PREDEFINED_GROUP", 0))
             return ("（本关 %d 条出怪动作全是「预置激活」ACTIVATE_PREDEFINED，"
                     "敌人（%d 个）由关卡预置字段在运行时激活，"
-                    "解包数据里没有各自的出场时间点；"
+                    "关卡数据里没有各自的出场时间点；"
                     "这类多为人机对战/对决关，沙盘不推演其波次）"
                     % (n_pre, n_refs))
 
@@ -1284,7 +1289,7 @@ class PathPanel(ttk.Frame):
             # 这类关卡多是「塔防小游戏」式的迷你活动（FD-1 繁荣滋长、
             # TG-1 双向通风、act36side_ex03）：波次全部 managedByScheduler
             # 由调度器驱动，模板出怪整体标成未启用，实机靠关卡脚本另行下发。
-            return ("（本关 %d 条出怪在解包数据里全部标记为未启用 isValid=false，"
+            return ("（本关 %d 条出怪在关卡数据里全部标记为未启用 isValid=false，"
                     "属模板波次（多为迷你玩法关），实机由关卡脚本另行下发；"
                     "取消「按实机编队」可把模板原样列出来）" % n_all)
         if self.var_effective_only.get():
@@ -2041,7 +2046,9 @@ class PathPanel(ttk.Frame):
         gm = self.game_map
         if not tl or not gm:
             return
-        pos = positions_at(tl, seconds, self.analyses, gm, rich=True)
+        pos = positions_at(tl, seconds, self.analyses, gm, rich=True,
+                           hostile_only=self.var_hide_harmless.get(),
+                           fold_random=self.var_effective_only.get())
         for item in pos:
             st = self._enemy_stat(item.get("enemy_id"))
             if st:

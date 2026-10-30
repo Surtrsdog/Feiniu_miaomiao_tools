@@ -217,7 +217,24 @@ class Paths:
                          # 肉鸽关卡都没有，1033 条全靠这张表；spec 把它打进
                          # 了包里，但这里漏了复制，exe 版「集成战略」分类
                          # 会整个变空——和 handbook 是同一类坑。
-                         "roguelike_topic_table.json"):
+                         "roguelike_topic_table.json",
+                         # 敌人抬手表（解包 bakemuzzledata 解析产物）。
+                         # 与 spec 的 seed 是两份独立白名单，必须成对维护。
+                         "enemy_attack_timing.json",
+                         # 干员抬手表（同一套 bake，按 charKey 索引）。
+                         # 图鉴「面板数值」的抬手/登场、「技能」卡的技能抬手
+                         # 都读它；漏了这份，干员页抬手整块消失。
+                         "operator_attack_timing.json",
+                         # 攻击范围图案表。MCP operator_range 靠它算「站这格
+                         # 能打到哪些格」；沙盘的攻击范围预览也读它。spec 里
+                         # 已经打进包里了，但**这里**漏了复制，exe 版范围
+                         # 查询会整块返回空——和 handbook 是同一个坑。
+                         "range_table.json",
+                         # 全库出怪时间轴（gen_stage_waves.py 构建期抽取）。
+                         # MCP stage_timeline / stage_field_at 的数据源，
+                         # 少人课题全靠它。与 spec 的 seed 是两份独立白名单。
+                         "stage_waves.json",
+                          "battle_logic.json"):
                 s = os.path.join(self.seed_root, "akcalc", "data", name)
                 d = os.path.join(self.data_dir, name)
                 if os.path.isfile(s) and not os.path.isfile(d):
