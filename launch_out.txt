@@ -1,4 +1,0 @@
-Starting...
-App imported
-App created
-Done
