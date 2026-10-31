@@ -95,11 +95,15 @@ def _timing_payload(enemy_id: str) -> Optional[dict]:
     if not hit:
         return None
     a = hit.get("a")
+    fr = ETIM.sec_to_frames(a)
     out = {
         "attack_windup_seconds": a,
         # 帧是原始数据（解包按 30fps 烘焙），不是估算值
-        "attack_windup_frames": ETIM.sec_to_frames(a),
+        "attack_windup_frames": fr,
         "fps": ETIM.FPS,
+        # 同一抬手在 30/60/120 帧率档下的帧号。30 是逻辑真帧，
+        # 60/120 是高刷插值帧：14 帧@30 == 28 帧@60 == 56 帧@120。
+        "frames_at_fps": ETIM.at_fps_table(fr) or {},
     }
     if hit.get("anim"):
         out["anim"] = hit["anim"]
