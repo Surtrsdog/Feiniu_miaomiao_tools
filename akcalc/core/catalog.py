@@ -48,7 +48,9 @@ CATEGORY_ORDER = [
 #:   v5: 拆分插曲与 Side Story——插曲=15/16/17章(MAINLINE_ACTIVITY)，
 #:       Side Story=permanent_sidestory_* 复刻活动，单独成一类
 #:   v6: hard_15~17 归插曲；#f#/#s 难度变体不再入目录（同一张图）
-CATALOG_SCHEMA = 6
+#:   v7: act1vecb→tower(矢量突破), act*break→crisis(危机合约),
+#:       tr_15/16/17→sidestory(插曲)
+CATALOG_SCHEMA = 7
 
 #: 分类 -> 一句说明，显示在分类主菜单的卡片上
 CATEGORY_DESC = {
@@ -345,7 +347,8 @@ def classify(stage_type: str, stage_id: str, zone_id: str,
     """
     zt = (zone_type or "").upper()
     st0 = (stage_type or "").upper()
-    head = (stage_id or "").split("_", 1)[0]
+    sid = stage_id or ""
+    head = sid.split("_", 1)[0]
 
     # id 前缀比 zone.type 更贴近玩家认知：
     #   hard_* 是主线高难（H 系列），zone 却挂在 MAINLINE 章节下。
@@ -361,7 +364,15 @@ def classify(stage_type: str, stage_id: str, zone_id: str,
         return "main"
     if head == "crisis":
         return "crisis"
-    if head == "tower":
+    if head == "tower" or sid.startswith("lt_"):
+        return "tower"
+    # act*break = 危机合约赛季挑战关卡（zone type 是 ACTIVITY，
+    # 但玩家认知里属于危机合约）
+    if "break" in sid:
+        return "crisis"
+    # act1vecb = 矢量突破活动（zone type 是 ACTIVITY，
+    # 但玩家认知里属于矢量突破）
+    if "vecb" in sid:
         return "tower"
     # 第 15/16/17 章的关卡 id 是 main_15-* / main_16-* / main_17-*，
     # zone.type = MAINLINE_ACTIVITY。用户要求这些归为「插曲」(sidestory)，
@@ -369,6 +380,15 @@ def classify(stage_type: str, stage_id: str, zone_id: str,
     if head == "main":
         # 先检查 zone type：MAINLINE_ACTIVITY / MAINLINE_RETRO -> 插曲
         if zt in ("MAINLINE_ACTIVITY", "MAINLINE_RETRO"):
+            return "sidestory"
+        return "main"
+
+    # TR 教程关：tr_15/tr_16/tr_17 属于第 15/16/17 章，
+    # 应归插曲（和 main_15/16/17 一起）。
+    # 其余 TR 关卡（tr_01~tr_25 等）留在主题曲。
+    if head == "tr":
+        num = sid.split("_", 1)[-1] if "_" in sid else ""
+        if num in ("15", "16", "17"):
             return "sidestory"
         return "main"
 
