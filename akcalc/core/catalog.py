@@ -48,9 +48,9 @@ CATEGORY_ORDER = [
 #:   v5: 拆分插曲与 Side Story——插曲=15/16/17章(MAINLINE_ACTIVITY)，
 #:       Side Story=permanent_sidestory_* 复刻活动，单独成一类
 #:   v6: hard_15~17 归插曲；#f#/#s 难度变体不再入目录（同一张图）
-#:   v7: act1vecb→tower(矢量突破), act*break→crisis(危机合约),
-#:       tr_15/16/17→sidestory(插曲)
-CATALOG_SCHEMA = 7
+#:   v8: act*break→tower(矢量突破,非危机合约), rune_*→crisis(经典赛季),
+#:       tr_15/16/17→main(zone是MAINLINE不是MAINLINE_ACTIVITY)
+CATALOG_SCHEMA = 8
 
 #: 分类 -> 一句说明，显示在分类主菜单的卡片上
 CATEGORY_DESC = {
@@ -364,15 +364,16 @@ def classify(stage_type: str, stage_id: str, zone_id: str,
         return "main"
     if head == "crisis":
         return "crisis"
+    # rune_* = 危机合约经典赛季（CLASSIC era），不在 stage_table 常规条目，
+    # 被外部补入。stage_type 为 RUNE，不命中任何 zone_type，落到 other。
+    if head == "rune":
+        return "crisis"
     if head == "tower" or sid.startswith("lt_"):
         return "tower"
-    # act*break = 危机合约赛季挑战关卡（zone type 是 ACTIVITY，
-    # 但玩家认知里属于危机合约）
-    if "break" in sid:
-        return "crisis"
-    # act1vecb = 矢量突破活动（zone type 是 ACTIVITY，
-    # 但玩家认知里属于矢量突破）
-    if "vecb" in sid:
+    # act*break / act1vecb = 矢量突破（3 期迭代），关卡代号 VEC-*，
+    # zone 名为核心突破/全力以赴/特别战线。虽然 zone type 是 ACTIVITY，
+    # 但它们不是限时活动，而是周期挑战·矢量突破。
+    if "break" in sid or "vecb" in sid:
         return "tower"
     # 第 15/16/17 章的关卡 id 是 main_15-* / main_16-* / main_17-*，
     # zone.type = MAINLINE_ACTIVITY。用户要求这些归为「插曲」(sidestory)，
@@ -383,13 +384,9 @@ def classify(stage_type: str, stage_id: str, zone_id: str,
             return "sidestory"
         return "main"
 
-    # TR 教程关：tr_15/tr_16/tr_17 属于第 15/16/17 章，
-    # 应归插曲（和 main_15/16/17 一起）。
-    # 其余 TR 关卡（tr_01~tr_25 等）留在主题曲。
+    # TR 教程关留在主题曲（tr_15/16/17 的 zone 是 main_3/6/7，
+    # 属于 MAINLINE 而非 MAINLINE_ACTIVITY，不应归插曲）。
     if head == "tr":
-        num = sid.split("_", 1)[-1] if "_" in sid else ""
-        if num in ("15", "16", "17"):
-            return "sidestory"
         return "main"
 
     if zt in _ZONE_TYPE_CATEGORY:
