@@ -177,7 +177,7 @@ class SettingsDialog(tk.Toplevel):
 
         # 「检查更新」：只查 GitHub Releases，不自动下载替换
         urow = tk.Frame(about, background=BG_PANEL)
-        urow.pack(fill="x", padx=PAD_M, pady=(0, PAD_M))
+        urow.pack(fill="x", padx=PAD_M, pady=(0, PAD_S))
         self.btn_update = ttk.Button(urow, text="检查更新", style="App.TButton",
                                      command=self.check_update)
         self.btn_update.pack(side="left")
@@ -186,6 +186,15 @@ class SettingsDialog(tk.Toplevel):
             background=BG_PANEL, foreground=FG_DIM,
             font=(FONT_UI, FS_MICRO))
         self.lbl_update.pack(side="left", padx=(PAD_S, 0))
+
+        # 交流反馈QQ群
+        qrow = tk.Frame(about, background=BG_PANEL)
+        qrow.pack(fill="x", padx=PAD_M, pady=(0, PAD_M))
+        tk.Label(qrow, text="交流反馈QQ群", background=BG_PANEL,
+                 foreground=FG_DIM, font=(FONT_UI, FS_SMALL)).pack(side="left")
+        tk.Label(qrow, text="1130616637", background=BG_PANEL,
+                 foreground=ACCENT, font=(FONT_NUM, FS_BODY, "bold")).pack(
+            side="left", padx=(PAD_S, 0))
 
         # 内容高度可能变化（比如配置 JSON 换行），让滚动区重新量一次
         try:
