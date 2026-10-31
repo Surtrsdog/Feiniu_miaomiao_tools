@@ -96,6 +96,51 @@ def num(s):
 
 h = Harness()
 
+# ------------------------------------------ 0. 路线时间线 / 全局游戏帧
+print("\n[0] 路线时间线与全局帧轴")
+from akcalc.core.routes import RouteAnalysis, RouteSegment, _interp_path_timed
+from akcalc.core.timeline import Timeline, SpawnEvent, positions_at
+from akcalc.core.timing import FPS, frames_to_sec
+from akcalc.ui.playback import PlaybackBar, PlaybackState
+from unittest.mock import patch
+
+_p = [(0, 0), (0, 1), (0, 2)]
+check("[0] 变速插值拐点", _interp_path_timed(_p, [1.5, 0.5], 1.5) == (0.0, 1.0))
+check("[0] 减速边内半时半格", _interp_path_timed(_p, [1.5, 0.5], 0.75) == (0.0, 0.5))
+_ra = RouteAnalysis(route_index=0, motion_mode="WALK", flying=False,
+                    total_time=2.0)
+_ra.segments = [RouteSegment(0, (0, 0), (0, 2), path=_p, time=2.0,
+                             edge_times=[1.5, 0.5])]
+check("[0] pose_at 使用逐边时间", _ra.pose_at(0.75) == (0.0, 0.5))
+check("[0] 路线终点后离场", _ra.pose_at(2.0) is None)
+_tl = Timeline(events=[
+    SpawnEvent(0.0, enemy_id="normal", route_index=0, hidden_group="normal"),
+    SpawnEvent(0.0, enemy_id="raid", route_index=0, hidden_group="raid"),
+    SpawnEvent(0.0, enemy_id="common", route_index=0),
+])
+_pos = positions_at(_tl, 0.0, [_ra], game_map=object(), fold_random=True)
+check("[0] 互斥编队只留一组", len(_pos) == 2)
+check("[0] 互斥编队保留无组单位", any(x[3] == "common" for x in _pos))
+_ps = PlaybackState(duration=10.0)
+_ps.play()
+with patch("akcalc.ui.playback.time.monotonic", side_effect=[100.0, 101.2]):
+    _ps.tick()
+    _ps.tick()
+check("[0] 卡顿不丢真实时间", abs(_ps.time - 1.2) < 1e-9)
+check("[0] 当前帧采用 floor", int(_ps.time * FPS) == 36)
+check("[0] 帧秒互转", frames_to_sec(36) == 1.2)
+_seen = []
+_bar = PlaybackBar(h.root, on_time=_seen.append)
+_bar.set_timeline(10.0)
+_bar.seek(0.01)
+check("[0] seek 吸附最近帧", _seen[-1] == 0.0)
+_bar.step(1.0 / FPS)
+check("[0] 单步到第1帧", abs(_seen[-1] - 1.0 / FPS) < 1e-9)
+check("[0] 帧标签同步", _bar.lbl_frame.cget("text") == "帧 1")
+_bar.step(1.0 / FPS)
+check("[0] 单步到第2帧", _bar.lbl_frame.cget("text") == "帧 2")
+_bar.destroy()
+
 # ---------------------------------------------------------------- 1. 混伤分类型
 print("\n[1] 混伤必须按类型分别计算")
 for name, kw in (("号角", "暴风号令"), ("瑕光", "先贤化身")):

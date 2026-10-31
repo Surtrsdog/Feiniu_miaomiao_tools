@@ -2059,9 +2059,11 @@ class PathPanel(ttk.Frame):
                 item["magic_resist"] = getattr(st, "magic_resist", None)
         self.canvas.set_frame(pos)
         self.timeline_canvas.set_current_time(seconds)
+        from ..core.timing import FPS
+        frame = int(seconds * FPS)
         if not pos:
             self.app.status.set(
-                "游戏时间 %.1fs　场上没有敌人" % seconds)
+                "游戏时间 %.1fs（全局第 %d 帧）　场上没有敌人" % (seconds, frame))
             return
         names = {}
         for item in pos:
@@ -2070,8 +2072,8 @@ class PathPanel(ttk.Frame):
         txt = "、".join("%s×%d" % (k, v) for k, v in
                          sorted(names.items(), key=lambda kv: -kv[1])[:5])
         self.app.status.set(
-            "游戏时间 %.1fs　场上 %d 只：%s%s"
-            % (seconds, len(pos), txt,
+            "游戏时间 %.1fs（全局第 %d 帧）　场上 %d 只：%s%s"
+            % (seconds, frame, len(pos), txt,
                " …" if len(names) > 5 else ""))
 
     def _enemy_stat(self, enemy_id):

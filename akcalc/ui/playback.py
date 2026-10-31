@@ -27,6 +27,7 @@ from typing import Callable, List, Optional
 from .widgets import (ACCENT, ACCENT_DIM, BG, BG_INPUT, BG_PANEL, BORDER,
                       DIVIDER, FG, FG_DIM, FONT_NUM, FONT_UI, FS_BODY,
                       FS_MICRO, FS_SMALL, PAD_M, PAD_S, PAD_XS, harmonize)
+from ..core import timing as _TIMING
 
 #: 可选倍速
 SPEEDS = (0.5, 1.0, 1.5, 2.0, 4.0)
@@ -205,15 +206,15 @@ class PlaybackBar(tk.Frame):
         self.btn_reset.pack(side="left", padx=(PAD_S, 0))
         self.btn_reset.bind("<Button-1>", lambda e: self.seek(0))
 
-        # 微调时间：±1s / ±0.1s。
-        # 播放中敌人圆点在两帧之间连续滑动，光靠眼睛很难确认「它现在
-        # 到底在哪一格」，所以给四个单步按钮，配合精确坐标读数对位。
+        # 微调时间：按全局游戏帧单步。
+        # 原先 ±0.1s 是 3 帧，读数会越过多个逻辑帧；现在每次只挪一帧，
+        # 配合帧号可以精确复核某个时刻的敌人位置。±1s 仍是 30 帧。
         self._step_btns = []
         for text, delta, tip in (
-                ("-1s", -STEP_LARGE, "回退 1 秒"),
-                ("-0.1s", -STEP_SMALL, "回退 0.1 秒"),
-                ("+0.1s", STEP_SMALL, "前进 0.1 秒"),
-                ("+1s", STEP_LARGE, "前进 1 秒")):
+                ("-1s", -STEP_LARGE, "回退 1 秒（30 帧）"),
+                ("-1f", -_TIMING.SEC_PER_FRAME, "回退 1 个全局游戏帧"),
+                ("+1f", _TIMING.SEC_PER_FRAME, "前进 1 个全局游戏帧"),
+                ("+1s", STEP_LARGE, "前进 1 秒（30 帧）")):
             b = tk.Label(row, text=text, background=BG_INPUT, foreground=FG,
                          font=(FONT_NUM, FS_MICRO), padx=PAD_XS, pady=3,
                          cursor="hand2")
@@ -231,6 +232,9 @@ class PlaybackBar(tk.Frame):
                                   background=BG_PANEL, foreground=FG_DIM,
                                   font=(FONT_NUM, FS_MICRO))
         self.lbl_frame.pack(side="left", padx=(0, PAD_M))
+        _tooltip(self.lbl_frame,
+                 "全局游戏帧（30 帧/秒），从开局第 0 帧起算。\n"
+                 "帧号是时间刻度；路线位置仍是近似模拟，不代表逐帧复现。")
 
         # 倍速
         tk.Label(row, text="倍速", background=BG_PANEL, foreground=FG_DIM,
@@ -289,7 +293,9 @@ class PlaybackBar(tk.Frame):
         self._refresh()
 
     def seek(self, seconds: float) -> None:
-        self.state.seek(seconds)
+        """跳转到最近的全局游戏帧；第 N 帧固定对应 N/30 秒。"""
+        frame = max(0, round(float(seconds) * _TIMING.FPS))
+        self.state.seek(_TIMING.frames_to_sec(frame))
         self._refresh()
         self._emit()
 
@@ -301,7 +307,12 @@ class PlaybackBar(tk.Frame):
         """
         if self.state.playing:
             self.pause()
-        self.state.step(delta)
+        # 以「当前所在帧」为基准做单步，不用 seconds±1/30 再四舍五入：
+        # 后者在 0.5 帧边界会受二进制浮点误差影响，连续两次 +1f
+        # 可能只前进一帧。
+        delta_frames = round(float(delta) * _TIMING.FPS)
+        frame = max(0, int(self.state.time * _TIMING.FPS) + delta_frames)
+        self.state.seek(_TIMING.frames_to_sec(frame))
         self._refresh()
         self._emit()
 
@@ -377,8 +388,7 @@ class PlaybackBar(tk.Frame):
         self.lbl_time.config(text=self.state.label())
         # 全局帧号：用 floor 表示「当前处于第几逻辑帧」，
         # t∈[0,1/30) 都是第 0 帧，与游戏内 30fps 逻辑一致。
-        from ..core.timing import FPS as _FPS
-        self.lbl_frame.config(text="帧 %d" % int(self.state.time * _FPS))
+        self.lbl_frame.config(text="帧 %d" % int(self.state.time * _TIMING.FPS))
         self._draw_progress()
         self._notify_state()
 
