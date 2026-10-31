@@ -1681,6 +1681,47 @@ class MapRenderer:
             k = (int(row), int(col))
             cells.setdefault(k, []).append((i, en))
 
+        # ---- 预计算每只敌人的散开偏移 ----
+        # 旧实现：同格 >1 只时按 idx/len 绕中心散开，偏移量是硬开关
+        #（1 只时偏移=0，2 只时突变到 r*1.15），敌人进出同一格的瞬间
+        # 圆点会跳一下——表现就是"互相挤了一下"。
+        # 现在改为：偏移量随**最近邻距离**平滑变化。两只敌人距离远
+        #（>1 格）时偏移 ≈ 0，距离近（<0.5 格）时偏移拉满。这样敌人
+        # 接近时圆点平滑散开、分离时平滑收拢，不会有突变。
+        fan_offsets: Dict[int, Tuple[float, float]] = {}
+        for (kr, kc), group in cells.items():
+            if len(group) <= 1:
+                continue
+            # 计算组内每只敌人到最近邻的距离
+            for idx_a, (i_a, en_a) in enumerate(group):
+                ra = float(en_a.get("row", 0))
+                ca = float(en_a.get("col", 0))
+                min_dist = 99.0
+                nearest_idx = -1
+                for idx_b, (i_b, en_b) in enumerate(group):
+                    if i_a == i_b:
+                        continue
+                    rb = float(en_b.get("row", 0))
+                    cb = float(en_b.get("col", 0))
+                    d = math.hypot(ra - rb, ca - cb)
+                    if d < min_dist:
+                        min_dist = d
+                        nearest_idx = idx_b
+                if nearest_idx < 0:
+                    continue
+                # 散开方向：以最近邻为参考，取 idx 在组内的角度。
+                # 用 idx 而不是"远离最近邻方向"是为了保持组内方向
+                # 稳定（不会因为最近邻切换而跳方向）。
+                n = len(group)
+                ang = 2 * math.pi * idx_a / n - math.pi / 2
+                # 偏移量平滑过渡：
+                #   min_dist >= 1.0 → off = 0（各走各的，不散开）
+                #   min_dist <= 0.4 → off = r * 1.15（几乎重叠，拉满）
+                #   中间线性插值
+                t = max(0.0, min(1.0, (1.0 - min_dist) / (1.0 - 0.4)))
+                off = r * 1.15 * t
+                fan_offsets[i_a] = (math.cos(ang) * off, math.sin(ang) * off)
+
         for (kr, kc), group in cells.items():
             if use_aggregate and len(group) > 3:
                 # 聚合模式：用格中心画 badge
@@ -1704,12 +1745,12 @@ class MapRenderer:
                 erow = float(en.get("row", 0))
                 ecol = float(en.get("col", 0))
                 ex, ey = self.tile_xy(erow, ecol)
-                # 重叠错开：同格多只时绕中心散开
-                if len(group) > 1:
-                    ang = 2 * math.pi * idx / len(group) - math.pi / 2
-                    off = r * 1.15
-                    ex += math.cos(ang) * off
-                    ey += math.sin(ang) * off
+                # 重叠错开：用预计算的平滑偏移（随最近邻距离渐变），
+                # 不再用硬开关"同格>1只就突变"。
+                if i in fan_offsets:
+                    dx, dy = fan_offsets[i]
+                    ex += dx
+                    ey += dy
 
                 ecol = en.get("color") or (240, 96, 90)
                 if isinstance(ecol, str):
