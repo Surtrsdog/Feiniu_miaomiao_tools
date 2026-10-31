@@ -486,14 +486,14 @@ class PathPanel(ttk.Frame):
                                font=(FONT_UI, FS_MICRO))
         self.lbl_tl.pack(side="left", padx=PAD_S)
 
-        self.timeline_canvas = TimelineCanvas(self.tl_frame, height=118)
+        self.timeline_canvas = TimelineCanvas(self.tl_frame, height=140)
         self.timeline_canvas.pack(fill="x", pady=(3, 0))
         self.timeline_canvas.on_seek = self._on_timeline_seek
 
         # ---- 播放控制条（开始/暂停/倍速/进度）
         self.playback = PlaybackBar(
             self.tl_frame, on_time=self._on_playback_time)
-        self.playback.pack(fill="x", pady=(PAD_XS, 0))
+        self.playback.pack(fill="x", pady=(PAD_S, 0))
 
         # ---- 右侧信息栏
         side = tk.Frame(body, background=BG, width=352)

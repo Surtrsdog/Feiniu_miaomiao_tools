@@ -40,7 +40,7 @@ PALETTE = [
 ]
 
 PAD_L, PAD_R, PAD_T, PAD_B = 54, 16, 14, 26
-ROW_H = 15
+ROW_H = 18
 
 
 class TimelineCanvas(tk.Canvas):
@@ -141,7 +141,9 @@ class TimelineCanvas(tk.Canvas):
             for e in rs.events:
                 ex = px(e.time)
                 hot = (e is self._hover_event)
-                r0 = max(2, self._row_h // 3)
+                # 出怪标记圆点：最小 3px，正常按行高 45% 画，
+                # 悬停再放大 2px。用户反馈原来的太小看不清。
+                r0 = max(3, int(self._row_h * 0.45))
                 if hot:
                     r0 += 2
                 self.create_oval(ex - r0, y - r0, ex + r0, y + r0,
