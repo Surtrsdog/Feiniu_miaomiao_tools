@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import ssl
 import time
@@ -23,6 +24,14 @@ _SSL_CTX = ssl.create_default_context()
 _SSL_CTX_INSECURE = ssl.create_default_context()
 _SSL_CTX_INSECURE.check_hostname = False
 _SSL_CTX_INSECURE.verify_mode = ssl.CERT_NONE
+
+#: 如果环境里有 HTTP_PROXY / HTTPS_PROXY，自动用它（和 curl/git 一致）。
+_proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
+if _proxy_url:
+    _OPENER = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": _proxy_url, "https": _proxy_url}))
+else:
+    _OPENER = urllib.request.build_opener()
 
 
 class FetchError(RuntimeError):
@@ -43,14 +52,30 @@ def fetch_bytes(url: str,
         for ctx in (_SSL_CTX, _SSL_CTX_INSECURE):
             try:
                 req = urllib.request.Request(url, headers=h)
-                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                    chunks = []
-                    while True:
-                        c = resp.read(131072)
-                        if not c:
-                            break
-                        chunks.append(c)
-                    return b"".join(chunks)
+                if _proxy_url:
+                    # OpenerDirector.open 不接受 context= 参数，
+                    # 需要把 SSL 上下文设到 HTTPSHandler 里
+                    https_handler = urllib.request.HTTPSHandler(context=ctx)
+                    opener = urllib.request.build_opener(
+                        urllib.request.ProxyHandler({"http": _proxy_url, "https": _proxy_url}),
+                        https_handler)
+                    with opener.open(req, timeout=timeout) as resp:
+                        chunks = []
+                        while True:
+                            c = resp.read(131072)
+                            if not c:
+                                break
+                            chunks.append(c)
+                        return b"".join(chunks)
+                else:
+                    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                        chunks = []
+                        while True:
+                            c = resp.read(131072)
+                            if not c:
+                                break
+                            chunks.append(c)
+                        return b"".join(chunks)
             except urllib.error.HTTPError as e:
                 last = e
                 # 4xx 不重试（除 403 限流与 429）

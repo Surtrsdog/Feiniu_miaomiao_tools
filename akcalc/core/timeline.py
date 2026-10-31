@@ -607,6 +607,11 @@ def parse_timeline(raw: dict,
             route = act.get("routeIndex")
             route_index = _i(route, -1) if route is not None else -1
             harmless = bool(act.get("isUnharmfulAndAlwaysCountAsKilled"))
+            # 侵入式调用（enemy_10072_mpprhd）：第15章的隐藏 Boss，是 PRTS
+            # 机制的一部分——不攻击、不扣生命值、不可阻挡。虽然数据里没标
+            # isUnharmfulAndAlwaysCountAsKilled，但实质无害，按无害处理。
+            if not harmless and "mpprhd" in eid:
+                harmless = True
             # isValid=False = 这条出怪永不触发（废案/未启用）
             disabled = act.get("isValid") is False
             hidden_group = str(act.get("hiddenGroup") or "")
