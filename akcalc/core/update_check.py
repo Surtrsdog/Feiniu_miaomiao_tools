@@ -123,16 +123,30 @@ def compare_versions(a: str, b: str) -> int:
 
 
 def check_latest(current: str, repo: str = "", timeout: int = _TIMEOUT) -> UpdateInfo:
-    """问 GitHub 要最新版本。**任何异常都不抛**，折成 ``ok=False``。"""
+    """问 GitHub 要最新版本。**任何异常都不抛**，折成 ``ok=False``。
+
+    同时查 Releases 和 Tags：有些版本只推了 git tag 但没在 GitHub
+    网页上建 Release（比如 v2.6），纯查 Releases 会漏掉，老用户
+    永远收不到更新提示。Tags API 没有下载链接和发版说明，但能
+    正确拿到版本号；用 tag 时把 URL 指向 releases 页面。
+    """
     slug = (repo or REPO or "").strip()
     if not slug or "/" not in slug or slug.startswith("owner/"):
         return UpdateInfo(False, current=current,
                           error="还没有配置仓库地址，暂时无法检查更新")
-    url = API_RELEASES % slug
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "FeiNiuMiaoMiao-UpdateChecker",
-        "Accept": "application/vnd.github+json",
-    })
+
+    def _fetch_json(url: str) -> list | None:
+        """GET 一个 GitHub API URL，失败返回 None。"""
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "FeiNiuMiaoMiao-UpdateChecker",
+            "Accept": "application/vnd.github+json",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as fh:
+                return json.loads(fh.read().decode("utf-8"))
+        except Exception:
+            return None
+
     # ``urlopen(timeout=)`` 只约束**已建立连接之后**的读写，DNS 解析不受它管。
     # 国内解析 api.github.com 经常被投毒到不可达的地址，那里会一路卡到
     # 系统默认的 21 秒——用户点了「检查更新」看着按钮灰二十秒，以为卡死。
@@ -140,40 +154,54 @@ def check_latest(current: str, repo: str = "", timeout: int = _TIMEOUT) -> Updat
     _prev = socket.getdefaulttimeout()
     socket.setdefaulttimeout(timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as fh:
-            data = json.loads(fh.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            # 仓库还没发过 Release 时也是 404，和仓库不存在同码，
-            # 提示里把两种可能都写出来，免得用户以为是网络问题。
-            return UpdateInfo(False, current=current,
-                              error="还没找到发布页（仓库未建或尚未发版）")
-        return UpdateInfo(False, current=current,
-                          error="GitHub 返回 HTTP %d" % e.code)
-    except urllib.error.URLError as e:
-        return UpdateInfo(False, current=current,
-                          error="网络不通：%s" % (getattr(e, "reason", e),))
-    except Exception as e:                                  # noqa: BLE001
-        return UpdateInfo(False, current=current,
-                          error="检查失败：%s" % e)
+        releases = _fetch_json(API_RELEASES % slug)
+        tags_url = "https://api.github.com/repos/%s/tags" % slug
+        tags_data = _fetch_json(tags_url)
     finally:
         socket.setdefaulttimeout(_prev)
 
-    if not isinstance(data, list):
-        return UpdateInfo(False, current=current, error="GitHub 返回了意外的数据")
-    # 滤掉草稿；预发布**要留着**，beta 阶段发的都是预发布。
-    cands = [r for r in data
-             if isinstance(r, dict) and not r.get("draft")
-             and str(r.get("tag_name") or "").strip()]
-    if not cands:
+    # ---- 从 Releases 里挑版本号最大的非草稿条目 ----
+    best_tag = ""
+    best_url = ""
+    best_notes = ""
+    best_pub = ""
+    if isinstance(releases, list):
+        cands = [r for r in releases
+                 if isinstance(r, dict) and not r.get("draft")
+                 and str(r.get("tag_name") or "").strip()]
+        if cands:
+            best = max(cands, key=lambda r: parse_version(
+                str(r.get("tag_name") or "")))
+            best_tag = str(best.get("tag_name") or "").strip()
+            best_url = str(best.get("html_url") or "").strip()
+            best_notes = str(best.get("body") or "").strip()
+            best_pub = str(best.get("published_at") or "")[:10]
+
+    # ---- 从 Tags 里挑版本号最大的 ----
+    tag_name = ""
+    if isinstance(tags_data, list):
+        tag_cands = [str(t.get("name") or "").strip()
+                     for t in tags_data
+                     if isinstance(t, dict) and str(t.get("name") or "").strip()]
+        if tag_cands:
+            tag_name = max(tag_cands, key=parse_version)
+
+    # ---- 取 Releases 和 Tags 中较新的那个 ----
+    if tag_name and (not best_tag
+                     or compare_versions(tag_name, best_tag) > 0):
+        # tag 比 release 新（或 release 根本没有），用 tag
+        best_tag = tag_name
+        best_url = "https://github.com/%s/releases" % slug
+        best_notes = ""
+        best_pub = ""
+
+    if not best_tag:
+        if isinstance(releases, list) and len(releases) == 0:
+            return UpdateInfo(False, current=current,
+                              error="仓库还没有正式发布任何版本")
+        # releases 请求失败（网络/404），tags 也失败
         return UpdateInfo(False, current=current,
-                          error="仓库还没有正式发布任何版本")
-    # 取版本号最大的那个，而不是列表第一个：列表按创建时间倒序，
-    # 补发一个旧版本会插到最前面，直接用第一条会「降级」。
-    best = max(cands, key=lambda r: parse_version(str(r.get("tag_name") or "")))
-    tag = str(best.get("tag_name") or "").strip()
-    html = str(best.get("html_url") or "").strip()
-    notes = str(best.get("body") or "").strip()
-    pub = str(best.get("published_at") or "")[:10]
-    return UpdateInfo(True, current=current, latest=tag, url=html,
-                      notes=notes, published=pub)
+                          error="网络不通或仓库不可达，请稍后重试")
+
+    return UpdateInfo(True, current=current, latest=best_tag, url=best_url,
+                      notes=best_notes, published=best_pub)
