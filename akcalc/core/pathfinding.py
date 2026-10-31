@@ -382,12 +382,12 @@ def travel_time_with_avoid(
     """计算路径行走时间，考虑避障力对移速的影响。
 
     游戏的 MoveController 每帧计算避障力：
-    - 路径上每格周围有类障碍物时，敌人移速降低
-    - 避障力 = max(actual_speed / theoretical_speed, 0.5)
+    - 避障合力系数 0.5（反汇编实证，见 constants.AVOID_SLOWDOWN）
+    - 转向刚性 100，速度对齐极快，贴障碍格近似全量减速
     - 实际移速 = theoretical_speed * (1 - avoid_force * steering_factor)
 
     简化模型：路径经过的每一格，如果周围 1 格内有障碍物，
-    则该格的行走速度乘以避障系数 0.7（中等减速）。
+    则该格的行走速度乘以避障减速系数 0.5。
     """
     return sum(edge_times_with_avoid(game_map, path, move_speed,
                                      move_multiplier, flying))
@@ -418,8 +418,9 @@ def edge_times_with_avoid(
 
         # 检查当前格周围是否有障碍物
         if not flying and _obstacle_nearby(game_map, r, c, flying, radius=1):
-            # 避障减速：移速 * 0.7（避障力引起的转向减速）
-            eff_v = v * 0.7
+            # 避障减速：v * (1 - avoid_force * steering_factor) = 0.5v
+            # （avoid_force=0.5 已从反汇编实证，见 constants.AVOID_SLOWDOWN）
+            eff_v = v * C.AVOID_SLOWDOWN
         else:
             eff_v = v
 

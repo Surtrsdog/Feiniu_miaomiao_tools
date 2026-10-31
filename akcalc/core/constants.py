@@ -65,6 +65,13 @@ SECONDARY_OFFSET_MAX = 0.2
 #: 行动受阻时的避障力与寻路加速度系数
 AVOID_FORCE_MIN = 0.5
 AVOID_ACCEL_COEF = 8.0
+#: 避障减速系数 = 1 - avoid_force * steeringFactor。
+#: 反汇编实证（GameAssembly.dll @ 0x1808B6E90，mulss xmm6,[rip+0x6588f0c]，
+#: 常数地址 0x186E3FDA4 = 0.5f）：MoveController._CalculateObstacleAvoidForce
+#: 对周围类障碍格产生的合力乘 0.5；_CalculateSteeringForce 的转向刚性
+#: 是 100.0f（0x186E3FDC4），速度对齐极快，因此贴障碍格近似全量减速：
+#: eff_v = v * (1 - 0.5 * 1.0) = 0.5v。
+AVOID_SLOWDOWN = 0.5
 
 # ---------------------------------------------------------------- 位移
 
