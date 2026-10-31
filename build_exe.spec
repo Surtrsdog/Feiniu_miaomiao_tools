@@ -220,6 +220,8 @@ hiddenimports = [
     'PIL.ImageFont',
     'PIL.ImageTk',
     'PIL._tkinter_finder',
+    # Pillow 11+ 的 C 扩展，PyInstaller 有时不会自动收集
+    'PIL._imaging',
 ]
 
 a = Analysis(
