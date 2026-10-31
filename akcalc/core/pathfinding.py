@@ -77,6 +77,103 @@ def can_enter(tile: Optional[Tile], flying: bool, allow_obstacle: bool = False) 
     return allow_obstacle
 
 
+def _raycast_clear(
+    game_map: GameMap,
+    a: Coord,
+    b: Coord,
+    flying: bool,
+    blocked: set,
+    force_open: set,
+    allow_obstacle: bool,
+) -> bool:
+    """Bresenham 射线检测：a→b 直线上的每个格是否可通行。
+
+    游戏的 SPFA._RaycastBresenhamLine / _RaycastSegmentLine 用 Bresenham
+    直线算法检测线段经过的格子，再用 _CheckRectangeAllClear 检查
+    矩形区域（RAYCAST_THICKNESS_HALF = _halfBodyWidth）是否全部清空。
+
+    这里用 Bresenham 直线检测 + 穿角检测：
+    - 遍历 a→b 直线上的每个格，不可通行的格阻挡射线
+    - 斜向跨格时，两个正交格都必须可通行（身体宽度不能穿过墙角）
+    """
+    r0, c0 = a
+    r1, c1 = b
+    dr = abs(r1 - r0)
+    dc = abs(c1 - c0)
+    sr = 1 if r1 > r0 else -1
+    sc = 1 if c1 > c0 else -1
+    err = dc - dr
+    r, c = r0, c0
+    prev_r, prev_c = r0, c0
+    first = True
+    while True:
+        if (r, c) != a and (r, c) != b:
+            if (r, c) in blocked:
+                return False
+            tile = game_map.tile_at(r, c)
+            if (r, c) not in force_open:
+                if not can_enter(tile, flying, allow_obstacle):
+                    return False
+                if not flying and tile and is_hole(tile):
+                    return False
+        # 检测斜向跨格时的穿角
+        if not first and r != prev_r and c != prev_c:
+            t1 = game_map.tile_at(prev_r, c)
+            t2 = game_map.tile_at(r, prev_c)
+            if not flying:
+                if t1 and (not can_enter(t1, flying, allow_obstacle) or is_hole(t1)):
+                    if (prev_r, c) not in force_open:
+                        return False
+                if t2 and (not can_enter(t2, flying, allow_obstacle) or is_hole(t2)):
+                    if (r, prev_c) not in force_open:
+                        return False
+        first = False
+        prev_r, prev_c = r, c
+        if (r, c) == (r1, c1):
+            break
+        e2 = 2 * err
+        if e2 > -dr:
+            err -= dr
+            c += sc
+        if e2 < dc:
+            err += dc
+            r += sr
+    return True
+
+
+def _smooth_path(
+    game_map: GameMap,
+    path: List[Coord],
+    flying: bool,
+    blocked: set,
+    force_open: set,
+    allow_obstacle: bool,
+) -> List[Coord]:
+    """路径平滑（_PostprocessAndMakeNextMapSmoothly 等价）。
+
+    对路径上每对 (i, i+k) 节点，如果 a→b 的直线射线无阻挡，
+    则移除中间的 k-1 个节点。从最远的可行对开始贪心处理。
+
+    这模拟游戏的 SPFA 后处理：原始 NextMap 是逐格的，
+    后处理用射线检测合并可直线到达的节点，形成长直线段。
+    """
+    if len(path) <= 2:
+        return path
+    result = [path[0]]
+    i = 0
+    while i < len(path) - 1:
+        # 从最远的节点开始找可直线到达的目标
+        j = len(path) - 1
+        while j > i + 1:
+            if _raycast_clear(game_map, path[i], path[j], flying,
+                              blocked, force_open, allow_obstacle):
+                break
+            j -= 1
+        result.append(path[j])
+        i = j
+    return result
+
+
 def find_path(
     game_map: GameMap,
     start: Coord,
@@ -86,7 +183,7 @@ def find_path(
     blocked: Optional[set] = None,
     allow_obstacle: bool = False,
     force_open: Optional[set] = None,
-    no_corner_cut: bool = False,
+    no_corner_cut: bool = True,
 ) -> PathResult:
     """在格网上做加权最短路径搜索（Dijkstra / SPFA 等价实现）。
 
@@ -100,13 +197,19 @@ def find_path(
     force_open: 强制视为可通行的格子集合。用于「出怪口 / 保护目标点」，
         这类格在数据里常被标成 tile_forbidden + FLY_ONLY（虚空行），
         但敌人实际能从中生成并走入地图。
-    no_corner_cut: 斜向移动时是否禁止「穿角」（两个正交格都不可通行）。
-        游戏本身没有这条限制，默认关闭；开启可用于更保守的估算。
+    no_corner_cut: 斜向移动时禁止「穿角」。默认开启。
+
+        游戏的 SPFA 使用带身体宽度 (_halfBodyWidth) 的射线检测
+        (_RaycastSegmentLine / _CheckRectangeAllClear) 来判定通行，
+        因此斜走穿过墙/禁入区的角是不允许的。
+        RAYCAST_THICKNESS_HALF 常量确保射线有厚度，不是无限细的线。
 
     说明
     ----
     游戏实际是 SPFA，但带非负权最短路与 Dijkstra 结果等价，
     这里用堆优化 Dijkstra 以保证 O(E log V) 性能。
+    寻路完成后会做路径平滑（_PostprocessAndMakeNextMapSmoothly 等价），
+    用射线检测合并可直线到达的节点。
     """
     blocked = blocked or set()
     force_open = force_open or set()
@@ -156,11 +259,20 @@ def find_path(
             if nxt not in force_open:
                 if not can_enter(tile, flying, allow_obstacle):
                     continue
-                if no_corner_cut and dr and dc:
-                    t1 = game_map.tile_at(r, nc)
-                    t2 = game_map.tile_at(nr, c)
+            # 穿角检测始终执行（即使目标格在 force_open 中）。
+            # force_open 只让敌人进入被标为 forbidden 的出怪口/蓝门，
+            # 不应该让敌人斜穿墙角到达这些格。
+            if dr and dc and not flying:
+                t1 = game_map.tile_at(r, nc)
+                t2 = game_map.tile_at(nr, c)
+                if no_corner_cut:
                     if not (can_enter(t1, flying) and can_enter(t2, flying)):
                         continue
+                # 地穴角始终不能穿
+                if t1 and is_hole(t1):
+                    continue
+                if t2 and is_hole(t2):
+                    continue
             w = tile_enter_cost(tile, flying)
             # 斜向距离为 sqrt2
             nd = d + w * (math.sqrt(2.0) if (dr and dc) else 1.0)
@@ -179,6 +291,18 @@ def find_path(
         node = prev[node]
         path.append(node)
     path.reverse()
+
+    # 路径平滑（_PostprocessAndMakeNextMapSmoothly 等价）
+    #
+    # 游戏的 SPFA 在生成 NextMap 后做后处理：用 _RaycastSegmentLine
+    # 检测路径上两个非相邻节点之间能否直线到达，如果可以就跳过中间节点。
+    # _RaycastSegmentLine 使用 Bresenham 直线算法 + RAYCAST_THICKNESS_HALF
+    # 检测线段上每个格子是否可通行。
+    #
+    # 这里用相同逻辑：对路径上每对 (i, i+k) 节点，检测能否直线到达，
+    # 如果可以就移除中间节点。从远到近贪心处理。
+    path = _smooth_path(game_map, path, flying, blocked, force_open,
+                        allow_obstacle)
 
     res.path = path
     res.cost = dist[(gr, gc)]
@@ -216,6 +340,79 @@ def travel_time(length_tiles: float, move_speed: float,
     if v <= 0:
         return float("inf")
     return length_tiles / v
+
+
+def stalled_escape_speed(move_speed: float,
+                         move_multiplier: float = C.MOVE_MULTIPLIER_DEFAULT) -> float:
+    """寻路断绝时，敌人离开当前格的匀速速度（格/秒）。
+
+    游戏内避障力 = max(实际移速 / 理论移速, 0.5)，
+    寻路加速度 = (目标移速 - 实际移速) * 8。
+    寻路断绝时目标移速 = 0，所以：
+        0.5 = (0 - v) * 8  =>  v = 0.0625
+    对移速 > 0.25 的敌人，该值为常数 0.0625 格/秒。
+    """
+    return C.AVOID_FORCE_MIN / C.AVOID_ACCEL_COEF
+
+
+def _obstacle_nearby(game_map: GameMap, r: int, c: int,
+                     flying: bool, radius: int = 1) -> bool:
+    """检查格子 (r,c) 周围 radius 格内是否有类障碍物地块。
+
+    游戏的避障力计算会检测敌人脚下的格子周围是否有障碍物，
+    有则施加转向力减慢移速。这里简化为布尔检测。
+    """
+    for dr in range(-radius, radius + 1):
+        for dc in range(-radius, radius + 1):
+            if dr == 0 and dc == 0:
+                continue
+            t = game_map.tile_at(r + dr, c + dc)
+            if t and is_obstacle(t):
+                return True
+    return False
+
+
+def travel_time_with_avoid(
+    game_map: GameMap,
+    path: List[Coord],
+    move_speed: float,
+    move_multiplier: float = C.MOVE_MULTIPLIER_DEFAULT,
+    flying: bool = False,
+) -> float:
+    """计算路径行走时间，考虑避障力对移速的影响。
+
+    游戏的 MoveController 每帧计算避障力：
+    - 路径上每格周围有类障碍物时，敌人移速降低
+    - 避障力 = max(actual_speed / theoretical_speed, 0.5)
+    - 实际移速 = theoretical_speed * (1 - avoid_force * steering_factor)
+
+    简化模型：路径经过的每一格，如果周围 1 格内有障碍物，
+    则该格的行走速度乘以避障系数 0.7（中等减速）。
+    """
+    v = actual_move_speed(move_speed, move_multiplier)
+    if v <= 0 or len(path) < 2:
+        return 0.0
+
+    total_time = 0.0
+    for i in range(1, len(path)):
+        r, c = path[i]
+        # 几何距离（斜向 sqrt2）
+        pr, pc = path[i - 1]
+        seg_len = math.hypot(r - pr, c - pc)
+
+        # 检查当前格周围是否有障碍物
+        if not flying and _obstacle_nearby(game_map, r, c, flying, radius=1):
+            # 避障减速：移速 * 0.7（避障力引起的转向减速）
+            eff_v = v * 0.7
+        else:
+            eff_v = v
+
+        if eff_v <= 0:
+            total_time += float("inf")
+        else:
+            total_time += seg_len / eff_v
+
+    return total_time
 
 
 @dataclass
@@ -268,13 +465,22 @@ def simulate_route(
             "time": 0.0,
         }
         if pr.found:
-            t = travel_time(pr.length, move_speed, mul)
+            # 用考虑避障力的行走时间（路径经过障碍物附近会减速）
+            t = travel_time_with_avoid(game_map, pr.path, move_speed, mul, flying)
             seg["time"] = t
             tm.move_time += t
             tm.total_length += pr.length
         else:
+            # 寻路断绝：敌人以停滞逃逸速度（0.0625 格/秒）匀速爬向目标
             if tm.failed_segment < 0:
                 tm.failed_segment = i
+            dist = distance(cur, nxt)
+            escape_v = stalled_escape_speed(move_speed, mul)
+            if escape_v > 0:
+                t = dist / escape_v
+                seg["time"] = t
+                tm.move_time += t
+                tm.total_length += dist
         if i < len(waits) - 1 or route.checkpoints:
             tm.wait_time += waits[i]
         tm.segments.append(seg)

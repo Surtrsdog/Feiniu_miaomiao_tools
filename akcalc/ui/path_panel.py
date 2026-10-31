@@ -323,7 +323,7 @@ class PathPanel(ttk.Frame):
 
         lbl("关卡").pack(side="left", padx=(0, 3))
         self.var_level = tk.StringVar()
-        self.cmb_level = ComboBox(top, textvariable=self.var_level, width=22,
+        self.cmb_level = ComboBox(top, textvariable=self.var_level, width=28,
                                   state="readonly", values=[])
         self.cmb_level.pack(side="left", padx=(0, PAD_S))
         self.cmb_level.bind("<<ComboboxSelected>>", lambda e: self.load_selected())

@@ -348,7 +348,14 @@ def analyze_route(game_map: GameMap,
             seg.path = pr.path
             seg.length = pr.length
             seg.cost = pr.cost
-            seg.time = PF.travel_time(pr.length, move_speed, mul) if pr.found else 0.0
+            if pr.found:
+                # 用考虑避障力的行走时间（路径经过障碍物附近会减速）
+                seg.time = PF.travel_time_with_avoid(
+                    game_map, pr.path, move_speed, mul, flying)
+            else:
+                # 寻路断绝：敌人以停滞逃逸速度（0.0625 格/秒）爬向目标
+                seg.time = PF.distance(a, b) / PF.stalled_escape_speed(
+                    move_speed, mul) if mul > 0 else 0.0
         if not seg.found:
             ra.reachable = False
             if ra.failed_at < 0:

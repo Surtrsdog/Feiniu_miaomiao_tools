@@ -288,7 +288,7 @@ class SandboxPanel(tk.Frame):
         self.cmb_node.bind("<<ComboboxSelected>>", lambda e: self._on_node())
 
         lbl(row, "关卡")
-        self.cmb_stage = ComboBox(row, width=19, values=[])
+        self.cmb_stage = ComboBox(row, width=28, values=[])
         self.cmb_stage.pack(side="left")
         self.cmb_stage.bind("<<ComboboxSelected>>", self._on_stage_pick)
 

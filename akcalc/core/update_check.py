@@ -26,7 +26,7 @@ REPO = "Surtrsdog/Feiniu_miaomiao_tools"
 
 #: 当前版本号。发版只改这一处 —— 之前它只在 ui/settings_dialog.py 里定义，
 #: 而 web 界面不该反向依赖 ui 包，所以挪到 core 统一放。
-APP_VERSION = "2.5beta"
+APP_VERSION = "2.6"
 
 #: Releases API。
 #:

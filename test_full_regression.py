@@ -2067,7 +2067,7 @@ try:
             _det = _pp24b.detail_text.get("1.0", "end")
             check("路线详情写明天赋罚站", "天赋罚站" in _det, "")
             check("路线详情全程含天赋罚站",
-                  "103.6" in _det or "103.7" in _det,
+                  "112.8" in _det,
                   [x for x in _det.splitlines() if "全程" in x])
         except Exception as _e24b:
             check("路线详情可用", False, "%s" % _e24b)
