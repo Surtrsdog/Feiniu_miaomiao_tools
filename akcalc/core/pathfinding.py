@@ -389,11 +389,27 @@ def travel_time_with_avoid(
     简化模型：路径经过的每一格，如果周围 1 格内有障碍物，
     则该格的行走速度乘以避障系数 0.7（中等减速）。
     """
-    v = actual_move_speed(move_speed, move_multiplier)
-    if v <= 0 or len(path) < 2:
-        return 0.0
+    return sum(edge_times_with_avoid(game_map, path, move_speed,
+                                     move_multiplier, flying))
 
-    total_time = 0.0
+
+def edge_times_with_avoid(
+    game_map: GameMap,
+    path: List[Coord],
+    move_speed: float,
+    move_multiplier: float = C.MOVE_MULTIPLIER_DEFAULT,
+    flying: bool = False,
+) -> List[float]:
+    """逐边行走耗时（秒），供 pose_at 变速插值。
+
+    与 travel_time_with_avoid 同一模型，但不加总——把每条边的耗时
+    各自返回，让调用方可以在段内做非匀速推进。
+    """
+    v = actual_move_speed(move_speed, move_multiplier)
+    out: List[float] = []
+    if v <= 0 or len(path) < 2:
+        return out
+
     for i in range(1, len(path)):
         r, c = path[i]
         # 几何距离（斜向 sqrt2）
@@ -408,11 +424,10 @@ def travel_time_with_avoid(
             eff_v = v
 
         if eff_v <= 0:
-            total_time += float("inf")
+            out.append(float("inf"))
         else:
-            total_time += seg_len / eff_v
-
-    return total_time
+            out.append(seg_len / eff_v)
+    return out
 
 
 @dataclass

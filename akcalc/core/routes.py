@@ -57,6 +57,9 @@ class RouteSegment:
     found: bool = True
     wait_after: float = 0.0      # 到达后的停驻时间
     teleport: bool = False       # 本段是瞬移（不计路程）
+    #: 逐边耗时（秒），长度 = len(path)-1。pose_at 用它做变速插值，
+    #: 保证「避障减速边走得慢」在动画里也能看出来。
+    edge_times: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -138,11 +141,14 @@ class RouteAnalysis:
         for i, s in enumerate(segs):
             if s.time > 0:
                 if t < s.time:
-                    frac = t / s.time
-                    r, c = _interp_path(s.path, frac)
+                    # 段内变速插值：用 edge_times 找到当前落在第几条边上，
+                    # 再在该边内按比例插值。这样避障减速边（0.7 倍速）
+                    # 在动画里也走得慢，不是全程匀速。
+                    r, c = _interp_path_timed(s.path, s.edge_times, t)
                     # 段内线性过渡「起点偏移 -> 终点偏移」。
                     # 不这么做的话，敌人会在到达检查点的瞬间从格子正中
                     # 横跳半格到贴墙位置，动画看起来像抽搐。
+                    frac = t / s.time
                     a = self._seg_off(i)
                     b = self._seg_off(i + 1)
                     return (r + a[0] + (b[0] - a[0]) * frac,
@@ -238,6 +244,41 @@ def _interp_path(path: List[Coord], frac: float) -> Tuple[float, float]:
             r1, c1 = path[i + 1]
             return (r0 + (r1 - r0) * seg_t, c0 + (c1 - c0) * seg_t)
         acc += d
+    r1, c1 = path[-1]
+    return (float(r1), float(c1))
+
+
+def _interp_path_timed(path: List[Coord], edge_times: List[float],
+                       t: float) -> Tuple[float, float]:
+    """按逐边耗时在路径上做变速插值。
+
+    与 _interp_path 的区别：_interp_path 按几何长度匀速推进，
+    本函数按「时间」推进——减速边走得慢，加速边走得快。
+    edge_times[i] 是 path[i] -> path[i+1] 的耗时（秒）。
+
+    t 是已经走过的秒数（0 <= t <= sum(edge_times)）。
+    若 edge_times 为空或长度不匹配，退化为匀速插值。
+    """
+    if not path:
+        return (0.0, 0.0)
+    if len(path) == 1:
+        return (float(path[0][0]), float(path[0][1]))
+    if not edge_times or len(edge_times) != len(path) - 1:
+        # 退化为匀速（无变速信息时）
+        total_t = max(sum(edge_times), 0.001) if edge_times else 1.0
+        frac = t / total_t if total_t > 0 else 0.0
+        return _interp_path(path, frac)
+
+    t = max(0.0, t)
+    acc = 0.0
+    for i, et in enumerate(edge_times):
+        if acc + et >= t or i == len(edge_times) - 1:
+            seg_t = 0.0 if et <= 0 else (t - acc) / et
+            seg_t = min(1.0, max(0.0, seg_t))
+            r0, c0 = path[i]
+            r1, c1 = path[i + 1]
+            return (r0 + (r1 - r0) * seg_t, c0 + (c1 - c0) * seg_t)
+        acc += et
     r1, c1 = path[-1]
     return (float(r1), float(c1))
 
@@ -350,8 +391,9 @@ def analyze_route(game_map: GameMap,
             seg.cost = pr.cost
             if pr.found:
                 # 用考虑避障力的行走时间（路径经过障碍物附近会减速）
-                seg.time = PF.travel_time_with_avoid(
+                seg.edge_times = PF.edge_times_with_avoid(
                     game_map, pr.path, move_speed, mul, flying)
+                seg.time = sum(seg.edge_times)
             else:
                 # 寻路断绝：敌人以停滞逃逸速度（0.0625 格/秒）爬向目标
                 seg.time = PF.distance(a, b) / PF.stalled_escape_speed(
@@ -385,9 +427,17 @@ def analyze_route(game_map: GameMap,
             # 先扣途中停驻，扣不够再扣出发前罚站（保留出发前那段更贴近
             # 「这只怪提前站在这儿等着」的观感）。
             over = total_wait - WAIT_SENTINEL_CLAMP
-            cut = min(over, ra.wait_time)
-            ra.wait_time -= cut
-            over -= cut
+            # 从最后一个停驻段往前扣（越靠后越像「站到本关结束」的冗余），
+            # 同步修改 seg.wait_after 和 ra.wait_time，保证 pose_at
+            # 和 total_time 一致。
+            for s in reversed(ra.segments):
+                if over <= 0:
+                    break
+                if s.wait_after > 0:
+                    d = min(over, s.wait_after)
+                    s.wait_after -= d
+                    ra.wait_time -= d
+                    over -= d
             if over > 0:
                 ra.pre_wait = max(0.0, ra.pre_wait - over)
 

@@ -106,8 +106,10 @@ class PlaybackState:
             return True
         dt = now - self._last_wall
         self._last_wall = now
-        # 窗口被打断（拖拽、最小化）时 dt 可能很大，钳一下避免跳太远
-        dt = min(dt, 0.5) * self.speed
+        # 窗口被打断（拖拽、最小化）时 dt 可能很大。
+        # 不截断 dt——进度必须跟真实时间同步，掉帧只是画面不连续，
+        # 不应丢失真实经过的时间。
+        dt *= self.speed
         self.time = min(self.duration, self.time + dt)
         if self.time >= self.duration:
             self.playing = False
@@ -220,11 +222,15 @@ class PlaybackBar(tk.Frame):
             _tooltip(b, tip)
             self._step_btns.append(b)
 
-        # 时间
+        # 时间 + 全局帧号
         self.lbl_time = tk.Label(row, text="00:00.0 / 00:00.0",
                                  background=BG_PANEL, foreground=FG,
                                  font=(FONT_NUM, FS_SMALL))
-        self.lbl_time.pack(side="left", padx=(PAD_M, PAD_M))
+        self.lbl_time.pack(side="left", padx=(PAD_M, PAD_XS))
+        self.lbl_frame = tk.Label(row, text="帧 0",
+                                  background=BG_PANEL, foreground=FG_DIM,
+                                  font=(FONT_NUM, FS_MICRO))
+        self.lbl_frame.pack(side="left", padx=(0, PAD_M))
 
         # 倍速
         tk.Label(row, text="倍速", background=BG_PANEL, foreground=FG_DIM,
@@ -369,6 +375,10 @@ class PlaybackBar(tk.Frame):
             text="⏸  暂停播放" if playing else "▶  开始播放",
             background=ACCENT_DIM if playing else ACCENT)
         self.lbl_time.config(text=self.state.label())
+        # 全局帧号：用 floor 表示「当前处于第几逻辑帧」，
+        # t∈[0,1/30) 都是第 0 帧，与游戏内 30fps 逻辑一致。
+        from ..core.timing import FPS as _FPS
+        self.lbl_frame.config(text="帧 %d" % int(self.state.time * _FPS))
         self._draw_progress()
         self._notify_state()
 

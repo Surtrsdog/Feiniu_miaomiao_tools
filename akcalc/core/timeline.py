@@ -740,7 +740,10 @@ def positions_at(timeline: "Timeline", seconds: float,
     by_idx = {a.route_index: a for a in analyses}
     # 筛选事件：撇除无害单位 / 折叠随机候选包
     if fold_random:
-        evs = timeline.fold_random_packs()
+        # 用 effective_events 而非裸 fold_random_packs——后者不处理
+        # hiddenGroup 互斥编队，「按实机编队」模式会把普通/突袭两组
+        # 怪同时画出来。
+        evs = timeline.effective_events(fold_random=True)
     else:
         evs = timeline.events
     if hostile_only:
